@@ -1,0 +1,8 @@
+[package]
+name = "rkusb"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rusb = "0.9.4"
+zerocopy = { version = "0.8.39", features = ["derive", "simd"] }
