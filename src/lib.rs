@@ -1,6 +1,6 @@
 use std::{thread::sleep, time::Duration};
 
-use crc::{Algorithm, CRC_16_KERMIT, Crc};
+use crc::{CRC_16_KERMIT, Crc};
 
 use crate::image::{BootImage, RkBootEntryType};
 
@@ -130,9 +130,14 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         // Crc::new(algorithm)
         for (i, chunk) in data.chunks(4096).enumerate() {
             println!("Writting [{i}] chunk");
-            let n = self
-                .device
-                .write_control(0x40, 0xC, 0, dw_request, chunk, Duration::from_secs(5))?;
+            let n = self.device.write_control(
+                0x40,
+                0xC,
+                0,
+                dw_request,
+                chunk,
+                Duration::from_secs(5),
+            )?;
             if n != chunk.len() {
                 panic!("Transfer failed: {n}");
             }

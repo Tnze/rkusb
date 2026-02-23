@@ -4,7 +4,6 @@ use crc::{Algorithm, Crc};
 use zerocopy::{FromBytes, byteorder::little_endian::*};
 
 type UCHAR = u8;
-type WCHAR = U16;
 type USHORT = U16;
 type UINT = U32;
 type DWORD = U32;
