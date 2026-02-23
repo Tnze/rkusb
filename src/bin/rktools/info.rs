@@ -4,7 +4,7 @@ use std::{
 };
 
 use memmap2::Mmap;
-use rkusb::image::{BootImage, IDBlockHeader, RkBootEntryHeader, RkBootEntryType};
+use rkusb::image::{BootImage, RkBootEntryHeader, RkBootEntryType};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -29,7 +29,8 @@ pub fn exec(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn ldr_info(file: &mut File) -> Result<(), Box<dyn std::error::Error>> {
-    // TODO: Safety: lock the file while we are reading it
+    // file.lock_shared()?;
+    // Safety: the file is locked so no-one can modify it.
     let mmap = unsafe { Mmap::map(&*file)? };
     let boot_img = BootImage::new(&mmap[..]);
 
@@ -47,6 +48,15 @@ fn ldr_info(file: &mut File) -> Result<(), Box<dyn std::error::Error>> {
             ldr_entry_info(boot_img.get_entry(RkBootEntryType::EntryLoader, i), i);
         }
     }
+    let expected_crc32 = boot_img.get_crc32();
+    let calculated_ccrc32 = boot_img.calculate_crc32();
+    println!(
+        "CRC32 IsMatch: {}, Expected: {expected_crc32:#X}, Calculated: {calculated_ccrc32:#X}",
+        expected_crc32 == calculated_ccrc32
+    );
+
+    // drop(mmap);
+    // file.unlock()?;
     Ok(())
 }
 

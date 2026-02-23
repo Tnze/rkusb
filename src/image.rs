@@ -1,5 +1,4 @@
-use std::{ptr::read_unaligned, time::Instant};
-
+use crc::{Algorithm, Crc};
 use zerocopy::{FromBytes, byteorder::little_endian::*};
 
 type UCHAR = u8;
@@ -147,5 +146,23 @@ impl<'data> BootImage<'data> {
 
             entry as *const RkBootEntryHeader
         }
+    }
+
+    pub fn get_crc32(&self) -> u32 {
+        u32::from_le_bytes(*self.data.split_last_chunk::<4>().unwrap().1)
+    }
+
+    pub fn calculate_crc32(&self) -> u32 {
+        const ALGO: Algorithm<u32> = Algorithm {
+            width: 32,
+            poly: 0x04C10DB7,
+            init: 0x00000000,
+            refin: false,
+            refout: false,
+            xorout: 0x00000000,
+            check: 0x00000000,
+            residue: 0x00000000,
+        };
+        Crc::<u32>::new(&ALGO).checksum(self.data.split_last_chunk::<4>().unwrap().0)
     }
 }

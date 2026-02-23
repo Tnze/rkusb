@@ -6,6 +6,7 @@ authors = ["Tnze <Tnze@tnze.tech>"]
 
 [dependencies]
 clap = { version = "4.5.60", features = ["derive"] }
+crc = "3.4.0"
 memmap2 = "0.9.10"
 rusb = "0.9.4"
 zerocopy = { version = "0.8.39", features = ["derive", "simd"] }
