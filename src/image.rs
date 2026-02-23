@@ -1,3 +1,5 @@
+use std::{ptr::read_unaligned, time::Instant};
+
 use zerocopy::{FromBytes, byteorder::little_endian::*};
 
 type UCHAR = u8;
@@ -17,17 +19,28 @@ pub struct RkTime {
     pub second: u8,
 }
 
+impl ToString for RkTime {
+    fn to_string(&self) -> String {
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            self.year, self.month, self.day, self.hour, self.minute, self.second
+        )
+    }
+}
+
 type RkDeviceType = DWORD;
 
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
 pub enum RkBootEntryType {
-    Entry471,
-    Entry472,
-    EntryLoader,
+    Entry471 = 1,
+    Entry472 = 2,
+    EntryLoader = 4,
 }
 
 #[derive(FromBytes)]
 #[repr(C, packed)]
-pub struct IDBlock {
+pub struct IDBlockHeader {
     pub tag: UINT,
     pub size: USHORT,
     pub version: DWORD,
@@ -53,11 +66,86 @@ pub struct IDBlock {
     _reserved: [u8; 57],
 }
 
-pub struct RkBootEntry {
+impl std::fmt::Debug for IDBlockHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IDBlockHeader")
+            .field("tag", &self.tag.get())
+            .field("size", &self.size.get())
+            .field("version", &self.version.get())
+            .field("merge_version", &self.merge_version.get())
+            .field("release_time", &self.release_time.to_string())
+            .field("support_chip", &self.support_chip.get())
+            .field("entry_741_count", &self.entry_741_count)
+            .field("entry_741_offset", &self.entry_741_offset.get())
+            .field("entry_741_size", &self.entry_741_size)
+            .field("entry_742_count", &self.entry_742_count)
+            .field("entry_742_offset", &self.entry_742_offset.get())
+            .field("entry_742_size", &self.entry_742_size)
+            .field("loader_entry_count", &self.loader_entry_count)
+            .field("loader_entry_offset", &self.loader_entry_offset.get())
+            .field("loader_entry_size", &self.loader_entry_size)
+            .field("sign_flag", &self.sign_flag)
+            .field("rc4_flag", &self.rc4_flag)
+            .finish()
+    }
+}
+
+#[repr(C, packed)]
+pub struct RkBootEntryHeader {
     pub size: UCHAR,
     pub r#type: RkBootEntryType,
-    pub name: [WCHAR; 20],
+    pub name: [u16; 20],
     pub data_offset: DWORD,
     pub data_size: DWORD,
     pub data_delay: DWORD,
+}
+
+pub struct BootImage<'data> {
+    data: &'data [u8],
+}
+
+impl<'data> BootImage<'data> {
+    pub fn new(data: &'data [u8]) -> Self {
+        Self { data }
+    }
+
+    pub fn get_idblock(&self) -> *const IDBlockHeader {
+        assert!(self.data.len() > std::mem::size_of::<IDBlockHeader>());
+        self.data.as_ptr() as *const IDBlockHeader
+    }
+
+    pub fn get_entry(
+        &self,
+        entry_type: RkBootEntryType,
+        entry_index: usize,
+    ) -> *const RkBootEntryHeader {
+        let header = self.get_idblock();
+        unsafe {
+            let (offset, count, size) = match entry_type {
+                RkBootEntryType::Entry471 => (
+                    (*header).entry_741_offset,
+                    (*header).entry_741_count,
+                    (*header).entry_741_size,
+                ),
+                RkBootEntryType::Entry472 => (
+                    (*header).entry_742_offset,
+                    (*header).entry_742_count,
+                    (*header).entry_742_size,
+                ),
+                RkBootEntryType::EntryLoader => (
+                    (*header).loader_entry_offset,
+                    (*header).loader_entry_count,
+                    (*header).loader_entry_size,
+                ),
+            };
+            assert!(
+                entry_index < count as usize,
+                "Index {entry_index} out of range: [0, {count})"
+            );
+            let offset = offset.get() as usize + (size as usize) * (entry_index as usize);
+            let entry = self.data.as_ptr().add(offset);
+
+            entry as *const RkBootEntryHeader
+        }
+    }
 }

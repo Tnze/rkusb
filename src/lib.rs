@@ -74,27 +74,34 @@ fn is_msc_device(pid: u16, vid: u16) -> bool {
     }
 }
 
+#[derive(Debug)]
 pub enum RkUsbType {
-    None = 0x00,
+    Unknown = 0x00,
     Maskrom = 0x01,
     Loader = 0x02,
     MSC = 0x04,
 }
 
 impl RkUsbType {
-    pub fn detect(desc: rusb::DeviceDescriptor) -> Self {
+    pub fn detect(desc: &rusb::DeviceDescriptor) -> Option<Self> {
         let pid = desc.product_id();
         let vid = desc.vendor_id();
         if RkDeviceType::from_pid_vid(pid, vid).is_some() {
             if desc.usb_version().sub_minor() & 0x01 == 0 {
-                Self::Maskrom
+                Some(Self::Maskrom)
             } else {
-                Self::Loader
+                Some(Self::Loader)
+            }
+        } else if vid == 0x2207 && (pid >> 8) > 0 {
+            match desc.usb_version().sub_minor() & 0x01 {
+                0 => Some(Self::Maskrom),
+                1 => Some(Self::Loader),
+                _ => Some(Self::Unknown), // Unreachable yet, need more information
             }
         } else if is_msc_device(pid, vid) {
-            Self::MSC
+            Some(Self::MSC)
         } else {
-            Self::None
+            None
         }
     }
 }
@@ -104,12 +111,13 @@ pub struct RkDevice<T: rusb::UsbContext> {
 }
 
 impl<T: rusb::UsbContext> RkDevice<T> {
-    fn open(device: &rusb::Device<T>) -> rusb::Result<Self> {
+    pub fn open(device: &rusb::Device<T>) -> rusb::Result<Self> {
         let device = device.open()?;
-        let config_desc = device.device().active_config_descriptor()?;
-        for intf_desc in config_desc.interfaces() {
-            for alt_desc in intf_desc.descriptors() {}
-        }
         Ok(Self { device })
+    }
+
+    pub fn download_boot() -> rusb::Result<()> {
+        
+        todo!()
     }
 }
