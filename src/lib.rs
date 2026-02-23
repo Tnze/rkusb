@@ -1,3 +1,9 @@
+use std::{thread::sleep, time::Duration};
+
+use crc::{Algorithm, CRC_16_KERMIT, Crc};
+
+use crate::image::{BootImage, RkBootEntryType};
+
 pub mod image;
 
 #[repr(C)]
@@ -116,8 +122,36 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         Ok(Self { device })
     }
 
-    pub fn download_boot() -> rusb::Result<()> {
-        
-        todo!()
+    fn device_request(&mut self, dw_request: u16, data: &[u8]) -> rusb::Result<()> {
+        let crc16 = Crc::<u16>::new(&CRC_16_KERMIT).checksum(data);
+        let mut data = Vec::from(data);
+        data.push((crc16 >> 8) as u8);
+        data.push((crc16 & 0xFF) as u8);
+        // Crc::new(algorithm)
+        for (i, chunk) in data.chunks(4096).enumerate() {
+            println!("Writting [{i}] chunk");
+            let n = self
+                .device
+                .write_control(0x40, 0xC, 0, dw_request, chunk, Duration::from_secs(5))?;
+            if n != chunk.len() {
+                panic!("Transfer failed: {n}");
+            }
+            println!("Written {n} bytes");
+        }
+        Ok(())
+    }
+
+    pub fn download_boot(&mut self, boot_img: BootImage) -> rusb::Result<()> {
+        for (name, data, delay) in boot_img.iter_entries(RkBootEntryType::Entry471) {
+            println!("Writing {name}");
+            self.device_request(0x0471, data)?;
+            sleep(delay);
+        }
+        for (name, data, delay) in boot_img.iter_entries(RkBootEntryType::Entry472) {
+            println!("Writing {name}");
+            self.device_request(0x0472, data)?;
+            sleep(delay);
+        }
+        Ok(())
     }
 }

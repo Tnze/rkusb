@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crc::{Algorithm, Crc};
 use zerocopy::{FromBytes, byteorder::little_endian::*};
 
@@ -113,7 +115,7 @@ impl<'data> BootImage<'data> {
         self.data.as_ptr() as *const IDBlockHeader
     }
 
-    pub fn get_entry(
+    pub fn get_entry_header(
         &self,
         entry_type: RkBootEntryType,
         entry_index: usize,
@@ -148,6 +150,10 @@ impl<'data> BootImage<'data> {
         }
     }
 
+    pub fn get_entry_data(&self, offset: usize, size: usize) -> &'data [u8] {
+        &self.data[offset..size]
+    }
+
     pub fn get_crc32(&self) -> u32 {
         u32::from_le_bytes(*self.data.split_last_chunk::<4>().unwrap().1)
     }
@@ -164,5 +170,28 @@ impl<'data> BootImage<'data> {
             residue: 0x00000000,
         };
         Crc::<u32>::new(&ALGO).checksum(self.data.split_last_chunk::<4>().unwrap().0)
+    }
+
+    pub fn iter_entries(
+        &self,
+        typ: RkBootEntryType,
+    ) -> impl Iterator<Item = (String, &'data [u8], Duration)> {
+        let idblock = self.get_idblock();
+        unsafe {
+            let count = match typ {
+                RkBootEntryType::Entry471 => (*idblock).entry_742_count,
+                RkBootEntryType::Entry472 => (*idblock).entry_742_count,
+                RkBootEntryType::EntryLoader => (*idblock).loader_entry_count,
+            };
+            (0..count).map(move |i| {
+                let entry_header = self.get_entry_header(typ, i as usize);
+                let name = (*entry_header).name;
+                let name = String::from_utf16_lossy(&name[..]);
+                let offset = (*entry_header).data_offset.get() as usize;
+                let size = (*entry_header).data_size.get() as usize;
+                let delay = (*entry_header).data_delay.get() as u64;
+                (name, &self.data[offset..size], Duration::from_millis(delay))
+            })
+        }
     }
 }

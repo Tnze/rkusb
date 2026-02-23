@@ -39,13 +39,16 @@ fn ldr_info(file: &mut File) -> Result<(), Box<dyn std::error::Error>> {
         println!("{:#X?}", std::ptr::read_unaligned(idblock));
 
         for i in 0..(*idblock).entry_741_count as usize {
-            ldr_entry_info(boot_img.get_entry(RkBootEntryType::Entry471, i), i);
+            ldr_entry_info(boot_img.get_entry_header(RkBootEntryType::Entry471, i), i);
         }
         for i in 0..(*idblock).entry_742_count as usize {
-            ldr_entry_info(boot_img.get_entry(RkBootEntryType::Entry472, i), i);
+            ldr_entry_info(boot_img.get_entry_header(RkBootEntryType::Entry472, i), i);
         }
         for i in 0..(*idblock).loader_entry_count as usize {
-            ldr_entry_info(boot_img.get_entry(RkBootEntryType::EntryLoader, i), i);
+            ldr_entry_info(
+                boot_img.get_entry_header(RkBootEntryType::EntryLoader, i),
+                i,
+            );
         }
     }
     let expected_crc32 = boot_img.get_crc32();
@@ -72,7 +75,7 @@ unsafe fn ldr_entry_info(entry: *const RkBootEntryHeader, idx: usize) {
         } = *entry;
 
         println!(
-            "{type:?}[{idx}] {{ size: {size:#X}, name: {}, data_offset: {data_offset}, data_size: {data_size}, data_delay: {data_delay} }}",
+            "{} {{ size: {size:#X}, type: {type:?}[{idx}], data_offset: {data_offset:#X}, data_size: {data_size:#X}, data_delay: {data_delay} }}",
             String::from_utf16_lossy(&name[..])
         );
     }
