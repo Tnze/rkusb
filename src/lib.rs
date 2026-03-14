@@ -1,10 +1,23 @@
 use std::{cell::OnceCell, thread::sleep, time::Duration};
 
 use crc::{CRC_16_KERMIT, Crc};
+use thiserror::Error;
 
 use crate::image::{BootImage, RkBootEntryType};
 
 const USB_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Error, Debug)]
+pub enum RkUsbError {
+    #[error("USB error: {0}")]
+    Usb(#[from] rusb::Error),
+    #[error("CBW/CSW tag mismatch")]
+    TagMismatch,
+    #[error("Command failed with status {0}")]
+    CommandFailed(u8),
+    #[error("Invalid CSW data")]
+    InvalidCsw,
+}
 
 pub mod image;
 mod usb;
@@ -122,14 +135,17 @@ pub struct RkDevice<T: rusb::UsbContext> {
 }
 
 impl<T: rusb::UsbContext> RkDevice<T> {
-    pub fn open(device: &rusb::Device<T>) -> rusb::Result<Self> {
+    pub fn open(device: &rusb::Device<T>) -> Result<Self, RkUsbError> {
         let handle = device.open()?;
         let config = device.active_config_descriptor()?;
-        let interface = config.interfaces().next().ok_or(rusb::Error::NotFound)?;
+        let interface = config
+            .interfaces()
+            .next()
+            .ok_or(RkUsbError::Usb(rusb::Error::NotFound))?;
         let interface_desc = interface
             .descriptors()
             .next()
-            .ok_or(rusb::Error::NotFound)?;
+            .ok_or(RkUsbError::Usb(rusb::Error::NotFound))?;
         handle.claim_interface(interface_desc.interface_number())?;
         let bulk_in = OnceCell::new();
         let bulk_out = OnceCell::new();
@@ -139,24 +155,28 @@ impl<T: rusb::UsbContext> RkDevice<T> {
                     rusb::Direction::In => {
                         bulk_in
                             .set(endpoint.address())
-                            .map_err(|_| rusb::Error::Other)?;
+                            .map_err(|_| RkUsbError::Usb(rusb::Error::Other))?;
                     }
                     rusb::Direction::Out => {
                         bulk_out
                             .set(endpoint.address())
-                            .map_err(|_| rusb::Error::Other)?;
+                            .map_err(|_| RkUsbError::Usb(rusb::Error::Other))?;
                     }
                 }
             }
         }
         Ok(Self {
             device: handle,
-            bulk_in: *bulk_in.get().ok_or(rusb::Error::NotFound)?,
-            bulk_out: *bulk_out.get().ok_or(rusb::Error::NotFound)?,
+            bulk_in: *bulk_in
+                .get()
+                .ok_or(RkUsbError::Usb(rusb::Error::NotFound))?,
+            bulk_out: *bulk_out
+                .get()
+                .ok_or(RkUsbError::Usb(rusb::Error::NotFound))?,
         })
     }
 
-    fn device_request(&mut self, dw_request: u16, data: &[u8]) -> rusb::Result<()> {
+    fn device_request(&mut self, dw_request: u16, data: &[u8]) -> Result<(), RkUsbError> {
         let crc16 = Crc::<u16>::new(&CRC_16_KERMIT).checksum(data);
         let mut data = Vec::from(data);
         data.push((crc16 >> 8) as u8);
@@ -175,7 +195,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         Ok(())
     }
 
-    pub fn download_boot(&mut self, boot_img: BootImage) -> rusb::Result<()> {
+    pub fn download_boot(&mut self, boot_img: BootImage) -> Result<(), RkUsbError> {
         for (name, data, delay) in boot_img.iter_entries(RkBootEntryType::Entry471) {
             println!("Writing {name}");
             self.device_request(0x0471, data)?;
@@ -189,8 +209,9 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         Ok(())
     }
 
-    pub fn reset_device(&mut self) -> rusb::Result<()> {
-        let cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0xff); // DEVICE_RESET
+    pub fn reset_device(&mut self, subcode: u8) -> Result<(), RkUsbError> {
+        let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0xff); // DEVICE_RESET
+        cbw.cb.reserved = subcode;
 
         self.device
             .write_bulk(self.bulk_out, cbw.as_bytes(), USB_TIMEOUT)?;
@@ -199,14 +220,14 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         self.device
             .read_bulk(self.bulk_in, &mut csw_buf, USB_TIMEOUT)?;
 
-        let csw = usb::Csw::read_from_bytes(&csw_buf).map_err(|_| rusb::Error::Other)?;
+        let csw = usb::Csw::read_from_bytes(&csw_buf).map_err(|_| RkUsbError::InvalidCsw)?;
 
         if csw.tag != cbw.tag {
-            return Err(rusb::Error::Other);
+            return Err(RkUsbError::TagMismatch);
         }
 
         if csw.status != 0 {
-            return Err(rusb::Error::Other);
+            return Err(RkUsbError::CommandFailed(csw.status));
         }
 
         Ok(())
