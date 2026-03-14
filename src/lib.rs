@@ -1,10 +1,13 @@
-use std::{thread::sleep, time::Duration};
+use std::{cell::OnceCell, thread::sleep, time::Duration};
 
 use crc::{CRC_16_KERMIT, Crc};
 
 use crate::image::{BootImage, RkBootEntryType};
 
+const USB_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub mod image;
+mod usb;
 
 #[repr(C)]
 pub enum RkDeviceType {
@@ -114,12 +117,43 @@ impl RkUsbType {
 
 pub struct RkDevice<T: rusb::UsbContext> {
     device: rusb::DeviceHandle<T>,
+    bulk_in: u8,
+    bulk_out: u8,
 }
 
 impl<T: rusb::UsbContext> RkDevice<T> {
     pub fn open(device: &rusb::Device<T>) -> rusb::Result<Self> {
-        let device = device.open()?;
-        Ok(Self { device })
+        let handle = device.open()?;
+        let config = device.active_config_descriptor()?;
+        let interface = config.interfaces().next().ok_or(rusb::Error::NotFound)?;
+        let interface_desc = interface
+            .descriptors()
+            .next()
+            .ok_or(rusb::Error::NotFound)?;
+        handle.claim_interface(interface_desc.interface_number())?;
+        let bulk_in = OnceCell::new();
+        let bulk_out = OnceCell::new();
+        for endpoint in interface_desc.endpoint_descriptors() {
+            if endpoint.transfer_type() == rusb::TransferType::Bulk {
+                match endpoint.direction() {
+                    rusb::Direction::In => {
+                        bulk_in
+                            .set(endpoint.address())
+                            .map_err(|_| rusb::Error::Other)?;
+                    }
+                    rusb::Direction::Out => {
+                        bulk_out
+                            .set(endpoint.address())
+                            .map_err(|_| rusb::Error::Other)?;
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            device: handle,
+            bulk_in: *bulk_in.get().ok_or(rusb::Error::NotFound)?,
+            bulk_out: *bulk_out.get().ok_or(rusb::Error::NotFound)?,
+        })
     }
 
     fn device_request(&mut self, dw_request: u16, data: &[u8]) -> rusb::Result<()> {
@@ -130,14 +164,9 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         // Crc::new(algorithm)
         for (i, chunk) in data.chunks(4096).enumerate() {
             println!("Writting [{i}] chunk");
-            let n = self.device.write_control(
-                0x40,
-                0xC,
-                0,
-                dw_request,
-                chunk,
-                Duration::from_secs(5),
-            )?;
+            let n = self
+                .device
+                .write_control(0x40, 0xC, 0, dw_request, chunk, USB_TIMEOUT)?;
             if n != chunk.len() {
                 panic!("Transfer failed: {n}");
             }
@@ -157,6 +186,29 @@ impl<T: rusb::UsbContext> RkDevice<T> {
             self.device_request(0x0472, data)?;
             sleep(delay);
         }
+        Ok(())
+    }
+
+    pub fn reset_device(&mut self) -> rusb::Result<()> {
+        let cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0xff); // DEVICE_RESET
+
+        self.device
+            .write_bulk(self.bulk_out, cbw.as_bytes(), USB_TIMEOUT)?;
+
+        let mut csw_buf = [0u8; std::mem::size_of::<usb::Csw>()];
+        self.device
+            .read_bulk(self.bulk_in, &mut csw_buf, USB_TIMEOUT)?;
+
+        let csw = usb::Csw::read_from_bytes(&csw_buf).map_err(|_| rusb::Error::Other)?;
+
+        if csw.tag != cbw.tag {
+            return Err(rusb::Error::Other);
+        }
+
+        if csw.status != 0 {
+            return Err(rusb::Error::Other);
+        }
+
         Ok(())
     }
 }

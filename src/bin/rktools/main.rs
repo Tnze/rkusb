@@ -1,8 +1,8 @@
 use clap::{Parser, Subcommand};
 
 mod db;
-mod ls;
 mod info;
+mod ls;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None, propagate_version = true)]
@@ -18,7 +18,7 @@ enum Commands {
     #[command(about = "Download bootloader", visible_alias("db"))]
     DownloadBoot(db::Args),
     #[command(about = "Detect file content")]
-    Info(info::Args)
+    Info(info::Args),
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
