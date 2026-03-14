@@ -23,10 +23,10 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), Box<dyn std::erro
         eprintln!("No device found");
         return Ok(());
     };
-    let mut device = RkDevice::open(&device)?;
+    let mut device = RkDevice::open(&device).expect("Failed to open Rockusb");
 
-    let file = File::open(&args.path)?;
-    let mmap = unsafe { Mmap::map(&file)? };
+    let file = File::open(&args.path).expect("Failed to open image file");
+    let mmap = unsafe { Mmap::map(&file).expect("Failed to create memory map") };
     device.download_boot(BootImage::new(&mmap[..]))?;
     Ok(())
 }

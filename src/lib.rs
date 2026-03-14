@@ -1,6 +1,7 @@
 use std::{thread::sleep, time::Duration};
 
 use crc::{CRC_16_KERMIT, Crc};
+use thiserror::Error;
 
 use crate::image::{BootImage, RkBootEntryType};
 
@@ -116,9 +117,28 @@ pub struct RkDevice<T: rusb::UsbContext> {
     device: rusb::DeviceHandle<T>,
 }
 
+#[derive(Error, Debug)]
+pub enum DownloadBootErr {
+    #[error("Request 0x471 error: {0}")]
+    Download471Err(rusb::Error),
+    #[error("Request 0x472 error: {0}")]
+    Download472Err(rusb::Error),
+}
+
 impl<T: rusb::UsbContext> RkDevice<T> {
     pub fn open(device: &rusb::Device<T>) -> rusb::Result<Self> {
+        let intf_num = device
+            .active_config_descriptor()?
+            .interfaces()
+            .flat_map(|intf| intf.descriptors())
+            .find(|alt| {
+                alt.class_code() == 0xFF && alt.sub_class_code() == 6 && alt.protocol_code() == 5
+            })
+            .map(|x| x.interface_number());
         let device = device.open()?;
+        if let Some(intf_num) = intf_num {
+            device.claim_interface(intf_num)?;
+        }
         Ok(Self { device })
     }
 
@@ -146,15 +166,17 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         Ok(())
     }
 
-    pub fn download_boot(&mut self, boot_img: BootImage) -> rusb::Result<()> {
+    pub fn download_boot(&mut self, boot_img: BootImage) -> Result<(), DownloadBootErr> {
         for (name, data, delay) in boot_img.iter_entries(RkBootEntryType::Entry471) {
             println!("Writing {name}");
-            self.device_request(0x0471, data)?;
+            self.device_request(0x0471, data)
+                .map_err(DownloadBootErr::Download471Err)?;
             sleep(delay);
         }
         for (name, data, delay) in boot_img.iter_entries(RkBootEntryType::Entry472) {
             println!("Writing {name}");
-            self.device_request(0x0472, data)?;
+            self.device_request(0x0472, data)
+                .map_err(DownloadBootErr::Download472Err)?;
             sleep(delay);
         }
         Ok(())
