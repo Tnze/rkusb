@@ -1,7 +1,7 @@
 use std::fs::File;
 
 use memmap2::Mmap;
-use rkusb::RkDevice;
+use rkusb::{RkDevice, image::BootImage};
 
 use crate::common;
 
@@ -17,9 +17,10 @@ pub struct Args {
 
 pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let selected_device = common::select_device_by_bus_addr(usb_ctx, args.bus, args.addr)?;
-    let mut device = RkDevice::open(&selected_device)?;
-    let file = File::open(&args.path)?;
-    let mmap = unsafe { Mmap::map(&file)? };
-    device.download_boot(rkusb::image::BootImage::new(&mmap[..]))?;
+    let mut device = RkDevice::open(&selected_device).expect("Failed to open Rockusb");
+
+    let file = File::open(&args.path).expect("Failed to open image file");
+    let mmap = unsafe { Mmap::map(&file).expect("Failed to create memory map") };
+    device.download_boot(BootImage::new(&mmap[..]))?;
     Ok(())
 }
