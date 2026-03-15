@@ -1,16 +1,17 @@
 [package]
 name = "rkusb"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Tnze <Tnze@tnze.tech>"]
 license = "MIT"
 description = "Library and CLI tools for manipulating Rockchip devices"
 
 [dependencies]
-clap = { version = "4.5.60", features = ["derive"] }
+clap = { version = "4.6.0", features = ["derive"] }
 crc = "3.4.0"
+humantime = "2.3.0"
 memmap2 = "0.9.10"
 rusb = "0.9.4"
-thiserror = "1.0"
+thiserror = "2.0"
 zerocopy = { version = "0.8.39", features = ["derive", "simd"] }
 rand = "0.10.0"

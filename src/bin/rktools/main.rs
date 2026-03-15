@@ -5,6 +5,7 @@ mod db;
 mod info;
 mod ls;
 mod rst;
+mod wait;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None, propagate_version = true)]
@@ -23,6 +24,8 @@ enum Commands {
     Info(info::Args),
     #[command(about = "Reset device", visible_alias("rst"))]
     Reset(rst::Args),
+    #[command(about = "Wait for device to be available")]
+    Wait(wait::Args),
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -32,5 +35,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::DownloadBoot(args) => db::exec(rusb::Context::new()?, args),
         Commands::Info(args) => info::exec(args),
         Commands::Reset(args) => rst::exec(rusb::Context::new()?, args),
+        Commands::Wait(args) => wait::exec(rusb::Context::new()?, args),
     }
 }
