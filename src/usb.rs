@@ -1,5 +1,5 @@
 use rand::random;
-use zerocopy::{FromBytes, TryFromBytes};
+use zerocopy::FromBytes;
 
 const DIRECTION_OUT: u8 = 0x00;
 const DIRECTION_IN: u8 = 0x80;
@@ -109,12 +109,4 @@ pub struct Csw {
     pub tag: u32,
     pub data_residue: u32,
     pub status: u8,
-}
-
-impl Csw {
-    pub fn read_from_bytes(
-        bytes: &[u8],
-    ) -> Result<Self, zerocopy::error::TryReadError<&[u8], Self>> {
-        Self::try_read_from_bytes(bytes)
-    }
 }

@@ -2,6 +2,7 @@ use std::{cell::OnceCell, thread::sleep, time::Duration};
 
 use crc::{CRC_16_IBM_3740, Crc};
 use thiserror::Error;
+use zerocopy::TryFromBytes;
 
 use crate::image::{BootImage, RkBootEntryType};
 
@@ -213,24 +214,19 @@ impl<T: rusb::UsbContext> RkDevice<T> {
     pub fn reset_device(&mut self, subcode: u8) -> Result<(), RkUsbError> {
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0xff); // DEVICE_RESET
         cbw.cb.reserved = subcode;
-
         self.device
             .write_bulk(self.bulk_out, cbw.as_bytes(), USB_TIMEOUT)?;
 
         let mut csw_buf = [0u8; std::mem::size_of::<usb::Csw>()];
         self.device
             .read_bulk(self.bulk_in, &mut csw_buf, USB_TIMEOUT)?;
-
-        let csw = usb::Csw::read_from_bytes(&csw_buf).map_err(|_| RkUsbError::InvalidCsw)?;
-
+        let csw = usb::Csw::try_read_from_bytes(&csw_buf).map_err(|_| RkUsbError::InvalidCsw)?;
         if csw.tag != cbw.tag {
             return Err(RkUsbError::TagMismatch);
         }
-
         if csw.status != 0 {
             return Err(RkUsbError::CommandFailed(csw.status));
         }
-
         Ok(())
     }
 }
