@@ -86,14 +86,14 @@ impl RkDeviceType {
 }
 
 fn is_msc_device(pid: u16, vid: u16) -> bool {
-    match (pid, vid) {
+    matches!(
+        (pid, vid),
         (0x3203, 0x071B)
-        | (0x3205, 0x071B)
-        | (0x2910, 0x0BB4)
-        | (0x0000, 0x2207)
-        | (0x0010, 0x2207) => true,
-        _ => false,
-    }
+            | (0x3205, 0x071B)
+            | (0x2910, 0x0BB4)
+            | (0x0000, 0x2207)
+            | (0x0010, 0x2207)
+    )
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -183,13 +183,13 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         let mut data = Vec::from(data);
         data.push((crc16 >> 8) as u8);
         data.push((crc16 & 0xFF) as u8);
-        for (_i, chunk) in data.chunks(4096).enumerate() {
-            // println!("Writting [{i}] chunk");
+        for chunk in data.chunks(4096) {
             let n = self
                 .device
                 .write_control(0x40, 0xC, 0, dw_request, chunk, USB_TIMEOUT)?;
             if n != chunk.len() {
-                // panic!("Transfer failed: {n}");
+                // No enough bytes written
+                return Err(RkUsbError::Usb(rusb::Error::Io));
             }
             // println!("Written {n} bytes");
         }

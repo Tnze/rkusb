@@ -1,12 +1,12 @@
-use std::time::Duration;
+use std::{fmt::Display, time::Duration};
 
 use crc::{Algorithm, Crc};
 use zerocopy::{FromBytes, byteorder::little_endian::*};
 
-type UCHAR = u8;
-type USHORT = U16;
-type UINT = U32;
-type DWORD = U32;
+type Uchar = u8;
+type Ushort = U16;
+type Uint = U32;
+type Dword = U32;
 
 #[derive(FromBytes)]
 #[repr(C, packed)]
@@ -19,16 +19,17 @@ pub struct RkTime {
     pub second: u8,
 }
 
-impl ToString for RkTime {
-    fn to_string(&self) -> String {
-        format!(
+impl Display for RkTime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
             self.year, self.month, self.day, self.hour, self.minute, self.second
         )
     }
 }
 
-type RkDeviceType = DWORD;
+type RkDeviceType = Dword;
 
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -41,27 +42,27 @@ pub enum RkBootEntryType {
 #[derive(FromBytes)]
 #[repr(C, packed)]
 pub struct IDBlockHeader {
-    pub tag: UINT,
-    pub size: USHORT,
-    pub version: DWORD,
-    pub merge_version: DWORD,
+    pub tag: Uint,
+    pub size: Ushort,
+    pub version: Dword,
+    pub merge_version: Dword,
     pub release_time: RkTime,
     pub support_chip: RkDeviceType,
 
-    pub entry_741_count: UCHAR,
-    pub entry_741_offset: DWORD,
-    pub entry_741_size: UCHAR,
+    pub entry_741_count: Uchar,
+    pub entry_741_offset: Dword,
+    pub entry_741_size: Uchar,
 
-    pub entry_742_count: UCHAR,
-    pub entry_742_offset: DWORD,
-    pub entry_742_size: UCHAR,
+    pub entry_742_count: Uchar,
+    pub entry_742_offset: Dword,
+    pub entry_742_size: Uchar,
 
-    pub loader_entry_count: UCHAR,
-    pub loader_entry_offset: DWORD,
-    pub loader_entry_size: UCHAR,
+    pub loader_entry_count: Uchar,
+    pub loader_entry_offset: Dword,
+    pub loader_entry_size: Uchar,
 
-    pub sign_flag: UCHAR,
-    pub rc4_flag: UCHAR,
+    pub sign_flag: Uchar,
+    pub rc4_flag: Uchar,
 
     _reserved: [u8; 57],
 }
@@ -92,12 +93,12 @@ impl std::fmt::Debug for IDBlockHeader {
 
 #[repr(C, packed)]
 pub struct RkBootEntryHeader {
-    pub size: UCHAR,
+    pub size: Uchar,
     pub r#type: RkBootEntryType,
     pub name: [u16; 20],
-    pub data_offset: DWORD,
-    pub data_size: DWORD,
-    pub data_delay: DWORD,
+    pub data_offset: Dword,
+    pub data_size: Dword,
+    pub data_delay: Dword,
 }
 
 pub struct BootImage<'data> {
@@ -142,7 +143,7 @@ impl<'data> BootImage<'data> {
                 entry_index < count as usize,
                 "Index {entry_index} out of range: [0, {count})"
             );
-            let offset = offset.get() as usize + (size as usize) * (entry_index as usize);
+            let offset = offset.get() as usize + (size as usize) * entry_index;
             let entry = self.data.as_ptr().add(offset);
 
             entry as *const RkBootEntryHeader

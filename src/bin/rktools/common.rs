@@ -48,9 +48,9 @@ fn is_device_matching(
     let Some(typ) = RkUsbType::detect(&desc) else {
         return false;
     };
-    rkusb_type.map_or(true, |t| t == typ)
-        && bus.map_or(true, |b| dev.bus_number() == b)
-        && addr.map_or(true, |a| dev.address() == a)
+    rkusb_type.is_none_or(|t| t == typ)
+        && bus.is_none_or(|b| dev.bus_number() == b)
+        && addr.is_none_or(|a| dev.address() == a)
 }
 
 fn find_device_hotplug(
