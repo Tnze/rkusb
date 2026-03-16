@@ -1,6 +1,6 @@
 use std::{cell::OnceCell, thread::sleep, time::Duration};
 
-use crc::{CRC_16_KERMIT, Crc};
+use crc::{CRC_16_IBM_3740, Crc};
 use thiserror::Error;
 
 use crate::image::{BootImage, RkBootEntryType};
@@ -146,6 +146,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
             .descriptors()
             .next()
             .ok_or(RkUsbError::Usb(rusb::Error::NotFound))?;
+        handle.set_active_configuration(config.number())?;
         handle.claim_interface(interface_desc.interface_number())?;
         let bulk_in = OnceCell::new();
         let bulk_out = OnceCell::new();
@@ -177,13 +178,13 @@ impl<T: rusb::UsbContext> RkDevice<T> {
     }
 
     fn device_request(&mut self, dw_request: u16, data: &[u8]) -> Result<(), RkUsbError> {
-        let crc16 = Crc::<u16>::new(&CRC_16_KERMIT).checksum(data);
+        const CRC: Crc<u16> = Crc::<u16>::new(&CRC_16_IBM_3740);
+        let crc16 = CRC.checksum(data);
         let mut data = Vec::from(data);
         data.push((crc16 >> 8) as u8);
         data.push((crc16 & 0xFF) as u8);
-        // Crc::new(algorithm)
         for (i, chunk) in data.chunks(4096).enumerate() {
-            println!("Writting [{i}] chunk");
+            println!("Writting [{i}] chunk [{}]{data:02X?}", chunk.len());
             let n = self
                 .device
                 .write_control(0x40, 0xC, 0, dw_request, chunk, USB_TIMEOUT)?;

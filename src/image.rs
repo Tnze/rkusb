@@ -168,7 +168,8 @@ impl<'data> BootImage<'data> {
             check: 0x00000000,
             residue: 0x00000000,
         };
-        Crc::<u32>::new(&ALGO).checksum(self.data.split_last_chunk::<4>().unwrap().0)
+        const CRC: Crc<u32> = Crc::<u32>::new(&ALGO);
+        CRC.checksum(self.data.split_last_chunk::<4>().unwrap().0)
     }
 
     pub fn iter_entries(
@@ -189,7 +190,11 @@ impl<'data> BootImage<'data> {
                 let offset = (*entry_header).data_offset.get() as usize;
                 let size = (*entry_header).data_size.get() as usize;
                 let delay = (*entry_header).data_delay.get() as u64;
-                (name, &self.data[offset..size], Duration::from_millis(delay))
+                (
+                    name,
+                    &self.data[offset..offset + size],
+                    Duration::from_millis(delay),
+                )
             })
         }
     }
