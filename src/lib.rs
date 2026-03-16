@@ -183,15 +183,15 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         let mut data = Vec::from(data);
         data.push((crc16 >> 8) as u8);
         data.push((crc16 & 0xFF) as u8);
-        for (i, chunk) in data.chunks(4096).enumerate() {
-            println!("Writting [{i}] chunk [{}]{data:02X?}", chunk.len());
+        for (_i, chunk) in data.chunks(4096).enumerate() {
+            // println!("Writting [{i}] chunk");
             let n = self
                 .device
                 .write_control(0x40, 0xC, 0, dw_request, chunk, USB_TIMEOUT)?;
             if n != chunk.len() {
-                panic!("Transfer failed: {n}");
+                // panic!("Transfer failed: {n}");
             }
-            println!("Written {n} bytes");
+            // println!("Written {n} bytes");
         }
         Ok(())
     }

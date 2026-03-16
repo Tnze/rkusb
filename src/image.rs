@@ -179,7 +179,7 @@ impl<'data> BootImage<'data> {
         let idblock = self.get_idblock();
         unsafe {
             let count = match typ {
-                RkBootEntryType::Entry471 => (*idblock).entry_742_count,
+                RkBootEntryType::Entry471 => (*idblock).entry_741_count,
                 RkBootEntryType::Entry472 => (*idblock).entry_742_count,
                 RkBootEntryType::EntryLoader => (*idblock).loader_entry_count,
             };
