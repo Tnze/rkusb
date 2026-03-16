@@ -96,7 +96,7 @@ fn is_msc_device(pid: u16, vid: u16) -> bool {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum RkUsbType {
     Unknown = 0x00,
     Maskrom = 0x01,

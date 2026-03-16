@@ -1,9 +1,10 @@
 use std::fs::File;
 
 use memmap2::Mmap;
-use rkusb::{RkDevice, image::BootImage};
+use rkusb::{RkDevice, RkUsbError};
+use thiserror::Error;
 
-use crate::common;
+use crate::common::{self, DeviceSelectionError};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -13,14 +14,32 @@ pub struct Args {
     bus: Option<u8>,
     #[arg(long, help = "Address of the device")]
     addr: Option<u8>,
+    #[arg(long, help = "Wait for device with timeout (e.g., 30s, 1m)")]
+    wait: Option<String>,
 }
 
-pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let selected_device = common::select_device_by_bus_addr(usb_ctx, args.bus, args.addr)?;
-    let mut device = RkDevice::open(&selected_device).expect("Failed to open Rockusb");
+#[derive(Error, Debug)]
+pub enum DownloadBootError {
+    #[error("Device selection error: {0}")]
+    DeviceSelection(#[from] DeviceSelectionError),
+    #[error("Parse timeout: {0}")]
+    ParseTimeout(#[from] humantime::DurationError),
+    #[error("RkUsb error: {0}")]
+    RkUsb(#[from] RkUsbError),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+}
 
-    let file = File::open(&args.path).expect("Failed to open image file");
-    let mmap = unsafe { Mmap::map(&file).expect("Failed to create memory map") };
-    device.download_boot(BootImage::new(&mmap[..]))?;
+pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), DownloadBootError> {
+    let timeout = args
+        .wait
+        .as_ref()
+        .map(|s| humantime::parse_duration(s))
+        .transpose()?;
+    let selected_device = common::find_device(&usb_ctx, args.bus, args.addr, timeout)?;
+    let mut device = RkDevice::open(&selected_device)?;
+    let file = File::open(&args.path)?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    device.download_boot(rkusb::image::BootImage::new(&mmap[..]))?;
     Ok(())
 }
