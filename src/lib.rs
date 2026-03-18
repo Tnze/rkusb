@@ -309,10 +309,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         let sector_count_u16 =
             u16::try_from(sector_count).map_err(|_| RkUsbError::Usb(rusb::Error::InvalidParam))?;
 
-        trace!(
-            "Writing LBA sector={pos} sectors={sector_count_u16} bytes={} subcode={subcode:#04X}",
-            data.len()
-        );
+        trace!("WRITE_LBA lba={pos:#010X} count={sector_count_u16:#06X} subcode={subcode:#04X}");
 
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x15); // WRITE_LBA
         cbw.data_transfer_length = data.len() as u32;
@@ -322,6 +319,47 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         self.cbw_transaction(&cbw, Some(data), None)?;
 
         Ok(())
+    }
+
+    /// Read a contiguous range of sectors from storage starting at the given LBA.
+    pub fn read_lba(
+        &mut self,
+        pos: u32,
+        sector_count: u16,
+        subcode: u8,
+    ) -> Result<Vec<u8>, RkUsbError> {
+        if sector_count == 0 {
+            debug!("Skipping empty LBA read at start_sector={pos}");
+            return Ok(Vec::new());
+        }
+
+        let total_bytes = sector_count as usize * STORAGE_SECTOR_SIZE;
+        trace!("READ_LBA pos={pos:#010X} count={sector_count:#06X} subcode={subcode:#04X}");
+
+        let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x14); // READ_LBA
+        cbw.data_transfer_length = total_bytes as u32;
+        cbw.cb.address = pos.to_be();
+        cbw.cb.length = sector_count.to_be();
+        cbw.cb.reserved = subcode;
+
+        let mut data = vec![0u8; total_bytes];
+        self.cbw_transaction(&cbw, None, Some(&mut data))?;
+        Ok(data)
+    }
+
+    /// Erase a contiguous range of sectors from storage starting at the given LBA.
+    pub fn erase_lba(&mut self, pos: u32, sector_count: u16) -> Result<(), RkUsbError> {
+        if sector_count == 0 {
+            debug!("Skipping empty LBA erase at start_sector={pos}");
+            return Ok(());
+        }
+
+        trace!("ERASE_LBA pos={pos:#010X} count={sector_count:#06X}");
+
+        let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x25); // ERASE_LBA
+        cbw.cb.address = pos.to_be();
+        cbw.cb.length = sector_count.to_be();
+        self.cbw_transaction(&cbw, None, None)
     }
 
     /// Read current storage selection from device.
