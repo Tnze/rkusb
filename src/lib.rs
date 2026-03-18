@@ -13,6 +13,8 @@ const USB_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum RkUsbError {
     #[error("USB error: {0}")]
     Usb(#[from] rusb::Error),
+    #[error("Duplicate bulk endpoint detected in USB interface descriptor")]
+    DuplicateBulkEndpoint,
     #[error("CBW/CSW tag mismatch")]
     TagMismatch,
     #[error("Command failed with status {0}")]
@@ -44,6 +46,7 @@ pub enum RkDeviceType {
 }
 
 impl RkDeviceType {
+    /// Convert a USB VID/PID pair to a known Rockchip device type.
     pub fn from_pid_vid(pid: u16, vid: u16) -> Option<Self> {
         match (pid, vid) {
             (0x3201, 0x071B) => Some(Self::RK27),
@@ -65,6 +68,7 @@ impl RkDeviceType {
         }
     }
 
+    /// Convert a Rockchip device type to its representative USB VID/PID pair.
     pub fn to_pid_vid(&self) -> Option<(u16, u16)> {
         match self {
             Self::RKNone => None,
@@ -116,6 +120,7 @@ pub enum RkStorageType {
 }
 
 impl RkUsbType {
+    /// Detect the Rockchip USB mode from a USB device descriptor.
     pub fn detect(desc: &rusb::DeviceDescriptor) -> Option<Self> {
         let pid = desc.product_id();
         let vid = desc.vendor_id();
@@ -190,6 +195,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         Ok(())
     }
 
+    /// Open a Rockchip USB device handle and locate bulk endpoints.
     pub fn open(device: &rusb::Device<T>) -> Result<Self, RkUsbError> {
         debug!(
             "Opening USB device bus={} addr={}",
@@ -210,21 +216,16 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         handle.claim_interface(interface_desc.interface_number())?;
         let bulk_in = OnceCell::new();
         let bulk_out = OnceCell::new();
-        for endpoint in interface_desc.endpoint_descriptors() {
-            if endpoint.transfer_type() == rusb::TransferType::Bulk {
-                match endpoint.direction() {
-                    rusb::Direction::In => {
-                        bulk_in
-                            .set(endpoint.address())
-                            .map_err(|_| RkUsbError::Usb(rusb::Error::Other))?;
-                    }
-                    rusb::Direction::Out => {
-                        bulk_out
-                            .set(endpoint.address())
-                            .map_err(|_| RkUsbError::Usb(rusb::Error::Other))?;
-                    }
-                }
+        for endpoint in interface_desc
+            .endpoint_descriptors()
+            .filter(|ep| ep.transfer_type() == rusb::TransferType::Bulk)
+        {
+            match endpoint.direction() {
+                rusb::Direction::In => &bulk_in,
+                rusb::Direction::Out => &bulk_out,
             }
+            .set(endpoint.address())
+            .map_err(|_| RkUsbError::DuplicateBulkEndpoint)?;
         }
         Ok(Self {
             device: handle,
@@ -260,6 +261,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         Ok(())
     }
 
+    /// Download boot entries from a parsed Rockchip boot image.
     pub fn download_boot(&mut self, boot_img: BootImage) -> Result<(), RkUsbError> {
         for (name, data, delay) in boot_img.iter_entries(RkBootEntryType::Entry471) {
             info!("Downloading {name} with request 0x0471");
@@ -274,6 +276,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         Ok(())
     }
 
+    /// Reset the connected device with a specific reset subcode.
     pub fn reset_device(&mut self, subcode: u8) -> Result<(), RkUsbError> {
         info!("Resetting device with subcode={subcode:#04X}");
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0xff); // DEVICE_RESET
@@ -305,6 +308,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         self.cbw_transaction(&cbw, None)
     }
 
+    /// Change device storage using a typed storage selector.
     pub fn switch_storage_type(&mut self, storage: RkStorageType) -> Result<(), RkUsbError> {
         self.switch_storage(storage as u8)
     }
