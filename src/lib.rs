@@ -105,6 +105,15 @@ pub enum RkUsbType {
     MSC = 0x04,
 }
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RkStorageType {
+    Emmc = 1,
+    Sd = 2,
+    SpiNor = 9,
+}
+
 impl RkUsbType {
     pub fn detect(desc: &rusb::DeviceDescriptor) -> Option<Self> {
         let pid = desc.product_id();
@@ -136,6 +145,43 @@ pub struct RkDevice<T: rusb::UsbContext> {
 }
 
 impl<T: rusb::UsbContext> RkDevice<T> {
+    fn cbw_transaction(
+        &mut self,
+        cbw: &usb::Cbw<usb::Cbwcb>,
+        data_in: Option<&mut [u8]>,
+    ) -> Result<(), RkUsbError> {
+        let n = self
+            .device
+            .write_bulk(self.bulk_out, cbw.as_bytes(), USB_TIMEOUT)?;
+        if n != std::mem::size_of::<usb::Cbw<usb::Cbwcb>>() {
+            return Err(RkUsbError::Usb(rusb::Error::Io));
+        }
+
+        if let Some(buf) = data_in {
+            let n = self.device.read_bulk(self.bulk_in, buf, USB_TIMEOUT)?;
+            if n != buf.len() {
+                return Err(RkUsbError::Usb(rusb::Error::Io));
+            }
+        }
+
+        let mut csw_buf = [0u8; std::mem::size_of::<usb::Csw>()];
+        let n = self
+            .device
+            .read_bulk(self.bulk_in, &mut csw_buf, USB_TIMEOUT)?;
+        if n != csw_buf.len() {
+            return Err(RkUsbError::InvalidCsw);
+        }
+
+        let csw = usb::Csw::try_read_from_bytes(&csw_buf).map_err(|_| RkUsbError::InvalidCsw)?;
+        if csw.tag != cbw.tag {
+            return Err(RkUsbError::TagMismatch);
+        }
+        if csw.status != 0 {
+            return Err(RkUsbError::CommandFailed(csw.status));
+        }
+        Ok(())
+    }
+
     pub fn open(device: &rusb::Device<T>) -> Result<Self, RkUsbError> {
         let handle = device.open()?;
         let config = device.active_config_descriptor()?;
@@ -214,19 +260,31 @@ impl<T: rusb::UsbContext> RkDevice<T> {
     pub fn reset_device(&mut self, subcode: u8) -> Result<(), RkUsbError> {
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0xff); // DEVICE_RESET
         cbw.cb.reserved = subcode;
-        self.device
-            .write_bulk(self.bulk_out, cbw.as_bytes(), USB_TIMEOUT)?;
+        self.cbw_transaction(&cbw, None)
+    }
 
-        let mut csw_buf = [0u8; std::mem::size_of::<usb::Csw>()];
-        self.device
-            .read_bulk(self.bulk_in, &mut csw_buf, USB_TIMEOUT)?;
-        let csw = usb::Csw::try_read_from_bytes(&csw_buf).map_err(|_| RkUsbError::InvalidCsw)?;
-        if csw.tag != cbw.tag {
-            return Err(RkUsbError::TagMismatch);
-        }
-        if csw.status != 0 {
-            return Err(RkUsbError::CommandFailed(csw.status));
-        }
-        Ok(())
+    /// Read current storage selection from device.
+    ///
+    /// Return value matches Rockchip storage code (for example, 1=EMMC, 2=SD, 9=SPINOR).
+    /// Returns `None` when the device reports no active storage bit.
+    pub fn read_storage(&mut self) -> Result<Option<u8>, RkUsbError> {
+        let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x2B); // READ_STORAGE
+        cbw.data_transfer_length = 4;
+        let mut storage_bits_buf = [0u8; 4];
+        self.cbw_transaction(&cbw, Some(&mut storage_bits_buf))?;
+        let storage_bits = u32::from_le_bytes(storage_bits_buf);
+
+        Ok((storage_bits != 0).then_some(storage_bits.trailing_zeros() as u8))
+    }
+
+    /// Change device storage.
+    pub fn switch_storage(&mut self, storage: u8) -> Result<(), RkUsbError> {
+        let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x2A); // CHANGE_STORAGE
+        cbw.cb.reserved = storage;
+        self.cbw_transaction(&cbw, None)
+    }
+
+    pub fn switch_storage_type(&mut self, storage: RkStorageType) -> Result<(), RkUsbError> {
+        self.switch_storage(storage as u8)
     }
 }
