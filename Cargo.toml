@@ -9,7 +9,9 @@ description = "Library and CLI tools for manipulating Rockchip devices"
 [dependencies]
 clap = { version = "4.6.0", features = ["derive"] }
 crc = "3.4.0"
+env_logger = "0.11.8"
 humantime = "2.3.0"
+log = "0.4.28"
 memmap2 = "0.9.10"
 rusb = "0.9.4"
 thiserror = "2.0.18"

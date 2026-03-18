@@ -1,6 +1,7 @@
 use std::{cell::OnceCell, thread::sleep, time::Duration};
 
 use crc::{CRC_16_IBM_3740, Crc};
+use log::{debug, info, trace};
 use thiserror::Error;
 use zerocopy::TryFromBytes;
 
@@ -150,6 +151,10 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         cbw: &usb::Cbw<usb::Cbwcb>,
         data_in: Option<&mut [u8]>,
     ) -> Result<(), RkUsbError> {
+        let opcode = cbw.cb.oper_code;
+        let cbw_tag = cbw.tag;
+        let cbw_len = cbw.data_transfer_length;
+        trace!("Sending CBW opcode={opcode:#04X} tag={cbw_tag:#010X} len={cbw_len}");
         let n = self
             .device
             .write_bulk(self.bulk_out, cbw.as_bytes(), USB_TIMEOUT)?;
@@ -158,6 +163,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         }
 
         if let Some(buf) = data_in {
+            trace!("Reading data stage bytes={}", buf.len());
             let n = self.device.read_bulk(self.bulk_in, buf, USB_TIMEOUT)?;
             if n != buf.len() {
                 return Err(RkUsbError::Usb(rusb::Error::Io));
@@ -173,16 +179,23 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         }
 
         let csw = usb::Csw::try_read_from_bytes(&csw_buf).map_err(|_| RkUsbError::InvalidCsw)?;
-        if csw.tag != cbw.tag {
+        let csw_tag = csw.tag;
+        if csw_tag != cbw_tag {
             return Err(RkUsbError::TagMismatch);
         }
         if csw.status != 0 {
             return Err(RkUsbError::CommandFailed(csw.status));
         }
+        trace!("CSW validated tag={csw_tag:#010X}");
         Ok(())
     }
 
     pub fn open(device: &rusb::Device<T>) -> Result<Self, RkUsbError> {
+        debug!(
+            "Opening USB device bus={} addr={}",
+            device.bus_number(),
+            device.address()
+        );
         let handle = device.open()?;
         let config = device.active_config_descriptor()?;
         let interface = config
@@ -227,6 +240,10 @@ impl<T: rusb::UsbContext> RkDevice<T> {
     fn device_request(&mut self, dw_request: u16, data: &[u8]) -> Result<(), RkUsbError> {
         const CRC: Crc<u16> = Crc::<u16>::new(&CRC_16_IBM_3740);
         let crc16 = CRC.checksum(data);
+        debug!(
+            "Vendor request={dw_request:#06X} payload={} bytes crc16={crc16:#06X}",
+            data.len()
+        );
         let mut data = Vec::from(data);
         data.push((crc16 >> 8) as u8);
         data.push((crc16 & 0xFF) as u8);
@@ -238,19 +255,19 @@ impl<T: rusb::UsbContext> RkDevice<T> {
                 // No enough bytes written
                 return Err(RkUsbError::Usb(rusb::Error::Io));
             }
-            // println!("Written {n} bytes");
+            trace!("Vendor request chunk sent bytes={n}");
         }
         Ok(())
     }
 
     pub fn download_boot(&mut self, boot_img: BootImage) -> Result<(), RkUsbError> {
         for (name, data, delay) in boot_img.iter_entries(RkBootEntryType::Entry471) {
-            println!("Writing {name}");
+            info!("Downloading {name} with request 0x0471");
             self.device_request(0x0471, data)?;
             sleep(delay);
         }
         for (name, data, delay) in boot_img.iter_entries(RkBootEntryType::Entry472) {
-            println!("Writing {name}");
+            info!("Downloading {name} with request 0x0472");
             self.device_request(0x0472, data)?;
             sleep(delay);
         }
@@ -258,6 +275,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
     }
 
     pub fn reset_device(&mut self, subcode: u8) -> Result<(), RkUsbError> {
+        info!("Resetting device with subcode={subcode:#04X}");
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0xff); // DEVICE_RESET
         cbw.cb.reserved = subcode;
         self.cbw_transaction(&cbw, None)
@@ -268,17 +286,20 @@ impl<T: rusb::UsbContext> RkDevice<T> {
     /// Return value matches Rockchip storage code (for example, 1=EMMC, 2=SD, 9=SPINOR).
     /// Returns `None` when the device reports no active storage bit.
     pub fn read_storage(&mut self) -> Result<Option<u8>, RkUsbError> {
+        debug!("Reading current storage type");
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x2B); // READ_STORAGE
         cbw.data_transfer_length = 4;
         let mut storage_bits_buf = [0u8; 4];
         self.cbw_transaction(&cbw, Some(&mut storage_bits_buf))?;
         let storage_bits = u32::from_le_bytes(storage_bits_buf);
-
-        Ok((storage_bits != 0).then_some(storage_bits.trailing_zeros() as u8))
+        let selected = (storage_bits != 0).then_some(storage_bits.trailing_zeros() as u8);
+        debug!("Storage bitmap={storage_bits:#010X}, selected={selected:?}");
+        Ok(selected)
     }
 
     /// Change device storage.
     pub fn switch_storage(&mut self, storage: u8) -> Result<(), RkUsbError> {
+        info!("Switching storage to code={storage}");
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x2A); // CHANGE_STORAGE
         cbw.cb.reserved = storage;
         self.cbw_transaction(&cbw, None)

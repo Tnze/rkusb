@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 
 mod common;
 mod db;
@@ -10,6 +10,15 @@ mod wait;
 #[derive(Parser)]
 #[command(version, about, long_about = None, propagate_version = true)]
 struct Cli {
+    #[arg(
+        short,
+        long,
+        action = ArgAction::Count,
+        global = true,
+        help = "Increase log verbosity (-v: info, -vv: debug, -vvv: trace)"
+    )]
+    verbose: u8,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -30,6 +39,8 @@ enum Commands {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    init_logger(cli.verbose);
+
     match &cli.command {
         Commands::List(args) => ls::exec(rusb::Context::new()?, args)?,
         Commands::DownloadBoot(args) => db::exec(rusb::Context::new()?, args)?,
@@ -38,4 +49,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Wait(args) => wait::exec(rusb::Context::new()?, args)?,
     }
     Ok(())
+}
+
+fn init_logger(verbose: u8) {
+    let default_level = match verbose {
+        0 => "warn",
+        1 => "info",
+        2 => "debug",
+        _ => "trace",
+    };
+
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level));
+    builder.format_timestamp_secs();
+    builder.init();
 }
