@@ -3,6 +3,7 @@ use clap::{ArgAction, Parser, Subcommand};
 mod common;
 mod db;
 mod info;
+mod lba;
 mod ls;
 mod rst;
 mod wait;
@@ -33,6 +34,8 @@ enum Commands {
     Info(info::Args),
     #[command(about = "Reset device", visible_alias("rst"))]
     Reset(rst::Args),
+    #[command(about = "LBA operations (read/write/erase)")]
+    Lba(lba::Args),
     #[command(about = "Wait for device to be available")]
     Wait(wait::Args),
 }
@@ -46,6 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::DownloadBoot(args) => db::exec(rusb::Context::new()?, args)?,
         Commands::Info(args) => info::exec(args)?,
         Commands::Reset(args) => rst::exec(rusb::Context::new()?, args)?,
+        Commands::Lba(args) => lba::exec(rusb::Context::new()?, args)?,
         Commands::Wait(args) => wait::exec(rusb::Context::new()?, args)?,
     }
     Ok(())

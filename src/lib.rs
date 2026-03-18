@@ -325,26 +325,31 @@ impl<T: rusb::UsbContext> RkDevice<T> {
     pub fn read_lba(
         &mut self,
         pos: u32,
-        sector_count: u16,
+        data: &mut [u8],
         subcode: u8,
-    ) -> Result<Vec<u8>, RkUsbError> {
-        if sector_count == 0 {
+    ) -> Result<(), RkUsbError> {
+        if data.is_empty() {
             debug!("Skipping empty LBA read at start_sector={pos}");
-            return Ok(Vec::new());
+            return Ok(());
         }
 
-        let total_bytes = sector_count as usize * STORAGE_SECTOR_SIZE;
-        trace!("READ_LBA pos={pos:#010X} count={sector_count:#06X} subcode={subcode:#04X}");
+        if data.len() % STORAGE_SECTOR_SIZE != 0 {
+            return Err(RkUsbError::Usb(rusb::Error::InvalidParam));
+        }
+
+        let sector_count = data.len() / STORAGE_SECTOR_SIZE;
+        let sector_count_u16 =
+            u16::try_from(sector_count).map_err(|_| RkUsbError::Usb(rusb::Error::InvalidParam))?;
+
+        trace!("READ_LBA pos={pos:#010X} count={sector_count_u16:#06X} subcode={subcode:#04X}");
 
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x14); // READ_LBA
-        cbw.data_transfer_length = total_bytes as u32;
+        cbw.data_transfer_length = data.len() as u32;
         cbw.cb.address = pos.to_be();
-        cbw.cb.length = sector_count.to_be();
+        cbw.cb.length = sector_count_u16.to_be();
         cbw.cb.reserved = subcode;
 
-        let mut data = vec![0u8; total_bytes];
-        self.cbw_transaction(&cbw, None, Some(&mut data))?;
-        Ok(data)
+        self.cbw_transaction(&cbw, None, Some(data))
     }
 
     /// Erase a contiguous range of sectors from storage starting at the given LBA.
