@@ -8,6 +8,7 @@ use zerocopy::TryFromBytes;
 use crate::image::{BootImage, RkBootEntryType};
 
 const USB_TIMEOUT: Duration = Duration::from_secs(5);
+const STORAGE_SECTOR_SIZE: usize = 512;
 
 #[derive(Error, Debug)]
 pub enum RkUsbError {
@@ -154,6 +155,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
     fn cbw_transaction(
         &mut self,
         cbw: &usb::Cbw<usb::Cbwcb>,
+        data_out: Option<&[u8]>,
         data_in: Option<&mut [u8]>,
     ) -> Result<(), RkUsbError> {
         let opcode = cbw.cb.oper_code;
@@ -165,6 +167,14 @@ impl<T: rusb::UsbContext> RkDevice<T> {
             .write_bulk(self.bulk_out, cbw.as_bytes(), USB_TIMEOUT)?;
         if n != std::mem::size_of::<usb::Cbw<usb::Cbwcb>>() {
             return Err(RkUsbError::Usb(rusb::Error::Io));
+        }
+
+        if let Some(buf) = data_out {
+            trace!("Writing data stage bytes={}", buf.len());
+            let n = self.device.write_bulk(self.bulk_out, buf, USB_TIMEOUT)?;
+            if n != buf.len() {
+                return Err(RkUsbError::Usb(rusb::Error::Io));
+            }
         }
 
         if let Some(buf) = data_in {
@@ -281,7 +291,37 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         info!("Resetting device with subcode={subcode:#04X}");
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0xff); // DEVICE_RESET
         cbw.cb.reserved = subcode;
-        self.cbw_transaction(&cbw, None)
+        self.cbw_transaction(&cbw, None, None)
+    }
+
+    /// Write a contiguous sector-aligned buffer to storage starting at the given LBA.
+    pub fn write_lba(&mut self, pos: u32, data: &[u8], subcode: u8) -> Result<(), RkUsbError> {
+        if data.is_empty() {
+            debug!("Skipping empty LBA write at start_sector={pos}");
+            return Ok(());
+        }
+
+        if data.len() % STORAGE_SECTOR_SIZE != 0 {
+            return Err(RkUsbError::Usb(rusb::Error::InvalidParam));
+        }
+
+        let sector_count = data.len() / STORAGE_SECTOR_SIZE;
+        let sector_count_u16 =
+            u16::try_from(sector_count).map_err(|_| RkUsbError::Usb(rusb::Error::InvalidParam))?;
+
+        trace!(
+            "Writing LBA sector={pos} sectors={sector_count_u16} bytes={} subcode={subcode:#04X}",
+            data.len()
+        );
+
+        let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x15); // WRITE_LBA
+        cbw.data_transfer_length = data.len() as u32;
+        cbw.cb.address = pos.to_be();
+        cbw.cb.length = sector_count_u16.to_be();
+        cbw.cb.reserved = subcode;
+        self.cbw_transaction(&cbw, Some(data), None)?;
+
+        Ok(())
     }
 
     /// Read current storage selection from device.
@@ -293,7 +333,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x2B); // READ_STORAGE
         cbw.data_transfer_length = 4;
         let mut storage_bits_buf = [0u8; 4];
-        self.cbw_transaction(&cbw, Some(&mut storage_bits_buf))?;
+        self.cbw_transaction(&cbw, None, Some(&mut storage_bits_buf))?;
         let storage_bits = u32::from_le_bytes(storage_bits_buf);
         let selected = (storage_bits != 0).then_some(storage_bits.trailing_zeros() as u8);
         debug!("Storage bitmap={storage_bits:#010X}, selected={selected:?}");
@@ -305,7 +345,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         info!("Switching storage to code={storage}");
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x2A); // CHANGE_STORAGE
         cbw.cb.reserved = storage;
-        self.cbw_transaction(&cbw, None)
+        self.cbw_transaction(&cbw, None, None)
     }
 
     /// Change device storage using a typed storage selector.
