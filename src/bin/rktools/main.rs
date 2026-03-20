@@ -1,15 +1,8 @@
 use clap::{ArgAction, Parser, Subcommand};
 
 mod common;
-mod db;
-mod info;
-mod lba;
-mod ls;
-mod rst;
-mod storage;
-mod ul;
+mod subcommands;
 mod util;
-mod wait;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None, propagate_version = true)]
@@ -30,24 +23,24 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     #[command(about = "List all rkusb devices", visible_alias("ls"))]
-    List(ls::Args),
+    List(subcommands::list::Args),
     #[command(about = "Download bootloader", visible_alias("db"))]
-    DownloadBoot(db::Args),
+    DownloadBoot(subcommands::download_boot::Args),
     #[command(about = "Detect file content")]
-    Info(info::Args),
+    Info(subcommands::info::Args),
     #[command(about = "Reset device", visible_alias("rst"))]
-    Reset(rst::Args),
+    Reset(subcommands::reset::Args),
     #[command(about = "LBA operations (read/write/erase)")]
-    Lba(lba::Args),
+    Lba(subcommands::lba::Args),
     #[command(about = "Wait for device to be available")]
-    Wait(wait::Args),
+    Wait(subcommands::wait::Args),
     #[command(about = "Query or switch current storage", visible_alias("st"))]
-    Storage(storage::Args),
+    Storage(subcommands::storage::Args),
     #[command(
         about = "Upgrade loader by writing generated IDBlock",
         visible_alias("ul")
     )]
-    UpgradeLoader(ul::Args),
+    UpgradeLoader(subcommands::upgrade_loader::Args),
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -55,14 +48,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logger(cli.verbose);
 
     match &cli.command {
-        Commands::List(args) => ls::exec(rusb::Context::new()?, args)?,
-        Commands::DownloadBoot(args) => db::exec(rusb::Context::new()?, args)?,
-        Commands::Info(args) => info::exec(args)?,
-        Commands::Reset(args) => rst::exec(rusb::Context::new()?, args)?,
-        Commands::Lba(args) => lba::exec(rusb::Context::new()?, args)?,
-        Commands::Wait(args) => wait::exec(rusb::Context::new()?, args)?,
-        Commands::Storage(args) => storage::exec(rusb::Context::new()?, args)?,
-        Commands::UpgradeLoader(args) => ul::exec(rusb::Context::new()?, args)?,
+        Commands::List(args) => subcommands::list::exec(rusb::Context::new()?, args)?,
+        Commands::DownloadBoot(args) => {
+            subcommands::download_boot::exec(rusb::Context::new()?, args)?
+        }
+        Commands::Info(args) => subcommands::info::exec(args)?,
+        Commands::Reset(args) => subcommands::reset::exec(rusb::Context::new()?, args)?,
+        Commands::Lba(args) => subcommands::lba::exec(rusb::Context::new()?, args)?,
+        Commands::Wait(args) => subcommands::wait::exec(rusb::Context::new()?, args)?,
+        Commands::Storage(args) => subcommands::storage::exec(rusb::Context::new()?, args)?,
+        Commands::UpgradeLoader(args) => {
+            subcommands::upgrade_loader::exec(rusb::Context::new()?, args)?
+        }
     }
     Ok(())
 }
