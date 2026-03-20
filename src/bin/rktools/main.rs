@@ -6,6 +6,8 @@ mod info;
 mod lba;
 mod ls;
 mod rst;
+mod ul;
+mod util;
 mod wait;
 
 #[derive(Parser)]
@@ -38,6 +40,11 @@ enum Commands {
     Lba(lba::Args),
     #[command(about = "Wait for device to be available")]
     Wait(wait::Args),
+    #[command(
+        about = "Upgrade loader by writing generated IDBlock",
+        visible_alias("ul")
+    )]
+    UpgradeLoader(ul::Args),
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -51,6 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Reset(args) => rst::exec(rusb::Context::new()?, args)?,
         Commands::Lba(args) => lba::exec(rusb::Context::new()?, args)?,
         Commands::Wait(args) => wait::exec(rusb::Context::new()?, args)?,
+        Commands::UpgradeLoader(args) => ul::exec(rusb::Context::new()?, args)?,
     }
     Ok(())
 }

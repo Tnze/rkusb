@@ -364,6 +364,16 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         self.cbw_transaction(&cbw, None, None)
     }
 
+    /// Read device capability bytes.
+    pub fn read_capability(&mut self) -> Result<[u8; 8], RkUsbError> {
+        debug!("Reading device capability");
+        let mut capability = [0u8; 8];
+        let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0xAA); // READ_CAPABILITY
+        cbw.data_transfer_length = std::mem::size_of_val(&capability) as u32;
+        self.cbw_transaction(&cbw, None, Some(&mut capability))?;
+        Ok(capability)
+    }
+
     /// Read current storage selection from device.
     ///
     /// Return value matches Rockchip storage code (for example, 1=EMMC, 2=SD, 9=SPINOR).

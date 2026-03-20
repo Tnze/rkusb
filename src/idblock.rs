@@ -101,6 +101,45 @@ pub fn build_idblock(
     Ok(idblock)
 }
 
+pub fn build_new_idblock(
+    loader_head: &[u8],
+    ddr: &[u8],
+    loader: &[u8],
+    rc4_enabled: bool,
+) -> Result<Vec<u8>, IdBlockError> {
+    let head_len = loader_head.len().next_multiple_of(IDBLOCK_ALIGNMENT);
+    let ddr_len = ddr.len().next_multiple_of(IDBLOCK_ALIGNMENT);
+    let loader_len = loader.len().next_multiple_of(IDBLOCK_ALIGNMENT);
+
+    let total_len = head_len
+        .checked_add(ddr_len)
+        .and_then(|value| value.checked_add(loader_len))
+        .ok_or(IdBlockError::SizeOverflow)?;
+
+    let mut idblock = vec![0u8; total_len];
+
+    let (head_area, payload_rest) = idblock.split_at_mut(head_len);
+    let (ddr_area, loader_area) = payload_rest.split_at_mut(ddr_len);
+
+    head_area[..loader_head.len()].copy_from_slice(loader_head);
+    ddr_area[..ddr.len()].copy_from_slice(ddr);
+    loader_area[..loader.len()].copy_from_slice(loader);
+
+    if rc4_enabled {
+        for chunk in head_area.chunks_exact_mut(SECTOR_SIZE) {
+            Rc4Cipher::new((&RC4_KEY).into()).apply_keystream(chunk);
+        }
+        for chunk in ddr_area.chunks_exact_mut(SECTOR_SIZE) {
+            Rc4Cipher::new((&RC4_KEY).into()).apply_keystream(chunk);
+        }
+        for chunk in loader_area.chunks_exact_mut(SECTOR_SIZE) {
+            Rc4Cipher::new((&RC4_KEY).into()).apply_keystream(chunk);
+        }
+    }
+
+    Ok(idblock)
+}
+
 fn build_sector_0(
     sector: &mut [u8; SECTOR_SIZE],
     rc4_enabled: bool,

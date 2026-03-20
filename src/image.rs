@@ -247,6 +247,7 @@ impl<'data> RkBootImage<'data> {
                 let entry_header = self.get_entry_header(typ, i as usize);
                 let name = (*entry_header).name;
                 let name = String::from_utf16_lossy(&name[..]);
+                let name = name.trim_end_matches('\0').to_owned();
                 let offset = (*entry_header).data_offset.get() as usize;
                 let size = (*entry_header).data_size.get() as usize;
                 let delay = (*entry_header).data_delay.get() as u64;
@@ -336,7 +337,9 @@ impl Debug for RkBootImage<'_> {
                         data_size,
                         data_delay,
                     } = *self.get_entry_header(entry_type, entry_index as usize);
-                    ds.field(&String::from_utf16_lossy(&name[..]), &format_args!("{type:?} {{ size: {size:#X}, data_offset: {data_offset:#X}, data_size: {data_size:#X}, data_delay: {data_delay} }}"));
+                    let name = String::from_utf16_lossy(&name[..]);
+                    let name = name.trim_end_matches('\0').to_owned();
+                    ds.field(&name, &format_args!("{type:?} {{ size: {size:#X}, data_offset: {data_offset:#X}, data_size: {data_size:#X}, data_delay: {data_delay} }}"));
                 }
             }
         }

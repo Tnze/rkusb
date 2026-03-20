@@ -4,7 +4,10 @@ use clap::Subcommand;
 use memmap2::{Mmap, MmapMut};
 use rkusb::RkDevice;
 
-use crate::common;
+use crate::{
+    common,
+    util::{parse_u8, parse_u32},
+};
 
 const SECTOR_SIZE: usize = 512;
 const DEFAULT_RW_SECTORS: usize = 128;
@@ -138,26 +141,4 @@ fn exec_erase<T: rusb::UsbContext>(
 
     println!("Erase LBA OK, erased {} sectors", args.sector_count);
     Ok(())
-}
-
-fn parse_u32(input: &str) -> Result<u32, String> {
-    if let Some(hex) = input
-        .strip_prefix("0x")
-        .or_else(|| input.strip_prefix("0X"))
-    {
-        u32::from_str_radix(hex, 16).map_err(|e| e.to_string())
-    } else {
-        input.parse::<u32>().map_err(|e| e.to_string())
-    }
-}
-
-fn parse_u8(input: &str) -> Result<u8, String> {
-    if let Some(hex) = input
-        .strip_prefix("0x")
-        .or_else(|| input.strip_prefix("0X"))
-    {
-        u8::from_str_radix(hex, 16).map_err(|e| e.to_string())
-    } else {
-        input.parse::<u8>().map_err(|e| e.to_string())
-    }
 }
