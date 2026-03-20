@@ -24,6 +24,8 @@ pub enum RkUsbError {
     InvalidCsw,
 }
 
+pub(crate) mod checksum;
+pub mod idblock;
 pub mod image;
 mod usb;
 

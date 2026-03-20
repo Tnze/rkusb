@@ -3,9 +3,10 @@ use std::{
     time::Duration,
 };
 
-use crc::{Algorithm, Crc};
 use thiserror::Error;
 use zerocopy::{FromBytes, byteorder::little_endian::*};
+
+use crate::checksum::ROCKCHIP_CRC32;
 
 type Uchar = u8;
 type Ushort = U16;
@@ -228,18 +229,7 @@ impl<'data> RkBootImage<'data> {
     }
 
     pub fn calculate_crc32(&self) -> u32 {
-        const ALGO: Algorithm<u32> = Algorithm {
-            width: 32,
-            poly: 0x04C10DB7,
-            init: 0x00000000,
-            refin: false,
-            refout: false,
-            xorout: 0x00000000,
-            check: 0x00000000,
-            residue: 0x00000000,
-        };
-        const CRC: Crc<u32> = Crc::<u32>::new(&ALGO);
-        CRC.checksum(self.data.split_last_chunk::<4>().unwrap().0)
+        ROCKCHIP_CRC32.checksum(self.data.split_last_chunk::<4>().unwrap().0)
     }
 
     pub fn iter_entries(
