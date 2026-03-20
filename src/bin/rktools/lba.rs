@@ -97,20 +97,14 @@ fn exec_read<T: rusb::UsbContext>(
     file.set_len(output_bytes as u64)?;
     // Safety: file length is fixed before mapping and buffer is only written in-bounds.
     let mut mmap = unsafe { MmapMut::map_mut(&file)? };
+    let timeout = timeout_to(deadline, rusb::Error::Timeout);
 
     for (i, chunk) in mmap
         .chunks_mut(DEFAULT_RW_SECTORS * SECTOR_SIZE)
         .enumerate()
     {
         let pos = args.begin_sector + (i * DEFAULT_RW_SECTORS) as u32;
-        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "LBA command total timeout exceeded",
-            )
-            .into());
-        };
-        rkdev.read_lba(pos, chunk, args.subcode, remaining)?;
+        rkdev.read_lba(pos, chunk, args.subcode, timeout()?)?;
     }
 
     mmap.flush()?;
@@ -130,12 +124,12 @@ fn exec_write<T: rusb::UsbContext>(
     let timeout = timeout_to(deadline, rusb::Error::Timeout);
 
     for (i, chunk) in mmap.chunks(DEFAULT_RW_SECTORS * SECTOR_SIZE).enumerate() {
-        let pos = args.begin_sector + i as u32;
+        let pos = args.begin_sector + (i * DEFAULT_RW_SECTORS) as u32;
         let rem = chunk.len() % SECTOR_SIZE;
         if rem == 0 {
             rkdev.write_lba(pos, chunk, args.subcode, timeout()?)?;
         } else {
-            let mut padded = vec![0u8; SECTOR_SIZE - rem];
+            let mut padded = vec![0u8; chunk.len() + SECTOR_SIZE - rem];
             padded[..chunk.len()].copy_from_slice(chunk);
             rkdev.write_lba(pos, &padded, args.subcode, timeout()?)?;
         }
