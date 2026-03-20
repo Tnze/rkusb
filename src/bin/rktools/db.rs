@@ -40,6 +40,6 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), DownloadBootError
     let mut device = RkDevice::open(&selected_device)?;
     let file = File::open(&args.path)?;
     let mmap = unsafe { Mmap::map(&file)? };
-    device.download_boot(rkusb::image::BootImage::new(&mmap[..]))?;
+    device.download_boot(rkusb::image::RkBootImage::new(&mmap[..]))?;
     Ok(())
 }

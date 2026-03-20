@@ -5,7 +5,7 @@ use log::{debug, info, trace};
 use thiserror::Error;
 use zerocopy::TryFromBytes;
 
-use crate::image::{BootImage, RkBootEntryType};
+use crate::image::{RkBootEntryType, RkBootImage};
 
 const USB_TIMEOUT: Duration = Duration::from_secs(5);
 const STORAGE_SECTOR_SIZE: usize = 512;
@@ -272,7 +272,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
     }
 
     /// Download boot entries from a parsed Rockchip boot image.
-    pub fn download_boot(&mut self, boot_img: BootImage) -> Result<(), RkUsbError> {
+    pub fn download_boot(&mut self, boot_img: RkBootImage) -> Result<(), RkUsbError> {
         for (name, data, delay) in boot_img.iter_entries(RkBootEntryType::Entry471) {
             info!("Downloading {name} with request 0x0471");
             self.device_request(0x0471, data)?;

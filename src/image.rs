@@ -49,7 +49,7 @@ pub enum RkBootEntryType {
 
 #[derive(FromBytes)]
 #[repr(C, packed)]
-pub struct IDBlockHeader {
+pub struct RkBootHeader {
     pub tag: Uint,
     pub size: Ushort,
     pub version: Dword,
@@ -75,9 +75,9 @@ pub struct IDBlockHeader {
     _reserved: [u8; 57],
 }
 
-impl Debug for IDBlockHeader {
+impl Debug for RkBootHeader {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IDBlockHeader")
+        f.debug_struct("RkBootHeader")
             .field("tag", &self.tag.get())
             .field("size", &self.size.get())
             .field("version", &self.version.get())
@@ -100,7 +100,7 @@ impl Debug for IDBlockHeader {
 }
 
 #[repr(C, packed)]
-pub struct RkBootEntryHeader {
+pub struct RkBootEntry {
     pub size: Uchar,
     pub r#type: RkBootEntryType,
     pub name: [u16; 20],
@@ -150,7 +150,7 @@ impl Debug for RkFwHeader {
     }
 }
 
-pub struct BootImage<'data> {
+pub struct RkBootImage<'data> {
     data: &'data [u8],
 }
 
@@ -173,22 +173,22 @@ pub enum ImageError {
     MD5OutOfRange,
 }
 
-impl<'data> BootImage<'data> {
+impl<'data> RkBootImage<'data> {
     pub fn new(data: &'data [u8]) -> Self {
         Self { data }
     }
 
-    pub fn get_idblock(&self) -> *const IDBlockHeader {
-        assert!(self.data.len() > std::mem::size_of::<IDBlockHeader>());
-        self.data.as_ptr() as *const IDBlockHeader
+    pub fn boot_header_ptr(&self) -> *const RkBootHeader {
+        assert!(self.data.len() > std::mem::size_of::<RkBootHeader>());
+        self.data.as_ptr() as *const RkBootHeader
     }
 
     pub fn get_entry_header(
         &self,
         entry_type: RkBootEntryType,
         entry_index: usize,
-    ) -> *const RkBootEntryHeader {
-        let header = self.get_idblock();
+    ) -> *const RkBootEntry {
+        let header = self.boot_header_ptr();
         unsafe {
             let (offset, count, size) = match entry_type {
                 RkBootEntryType::Entry471 => (
@@ -214,7 +214,7 @@ impl<'data> BootImage<'data> {
             let offset = offset.get() as usize + (size as usize) * entry_index;
             let entry = self.data.as_ptr().add(offset);
 
-            entry as *const RkBootEntryHeader
+            entry as *const RkBootEntry
         }
     }
 
@@ -246,12 +246,12 @@ impl<'data> BootImage<'data> {
         &self,
         typ: RkBootEntryType,
     ) -> impl Iterator<Item = (String, &'data [u8], Duration)> {
-        let idblock = self.get_idblock();
+        let boot_header = self.boot_header_ptr();
         unsafe {
             let count = match typ {
-                RkBootEntryType::Entry471 => (*idblock).entry_741_count,
-                RkBootEntryType::Entry472 => (*idblock).entry_742_count,
-                RkBootEntryType::EntryLoader => (*idblock).loader_entry_count,
+                RkBootEntryType::Entry471 => (*boot_header).entry_741_count,
+                RkBootEntryType::Entry472 => (*boot_header).entry_742_count,
+                RkBootEntryType::EntryLoader => (*boot_header).loader_entry_count,
             };
             (0..count).map(move |i| {
                 let entry_header = self.get_entry_header(typ, i as usize);
@@ -314,31 +314,31 @@ impl<'data> RkFwImage<'data> {
         self.data.as_ptr() as *const RkFwHeader
     }
 
-    pub fn boot_data(&self) -> Option<BootImage<'data>> {
+    pub fn boot_data(&self) -> Option<RkBootImage<'data>> {
         let header = self.header_ptr();
         unsafe {
             let offset = (*header).boot_offset.get() as usize;
             let size = (*header).boot_size.get() as usize;
             let end = offset.checked_add(size)?;
-            self.data.get(offset..end).map(BootImage::new)
+            self.data.get(offset..end).map(RkBootImage::new)
         }
     }
 }
 
-impl Debug for BootImage<'_> {
+impl Debug for RkBootImage<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let idblock = unsafe { std::ptr::read_unaligned(self.get_idblock()) };
-        let mut ds = f.debug_struct("BootImage");
-        ds.field("header", &idblock);
+        let boot_header = unsafe { std::ptr::read_unaligned(self.boot_header_ptr()) };
+        let mut ds = f.debug_struct("RkBootImage");
+        ds.field("header", &boot_header);
 
         for (entry_count, entry_type) in [
-            (idblock.entry_741_count, RkBootEntryType::Entry471),
-            (idblock.entry_742_count, RkBootEntryType::Entry472),
-            (idblock.loader_entry_count, RkBootEntryType::EntryLoader),
+            (boot_header.entry_741_count, RkBootEntryType::Entry471),
+            (boot_header.entry_742_count, RkBootEntryType::Entry472),
+            (boot_header.loader_entry_count, RkBootEntryType::EntryLoader),
         ] {
             for entry_index in 0..entry_count {
                 unsafe {
-                    let RkBootEntryHeader {
+                    let RkBootEntry {
                         size,
                         r#type,
                         name,
