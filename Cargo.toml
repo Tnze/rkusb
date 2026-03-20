@@ -17,3 +17,4 @@ rusb = "0.9.4"
 thiserror = "2.0.18"
 zerocopy = { version = "0.8.39", features = ["derive", "simd"] }
 rand = "0.10.0"
+hex = "0.4.3"

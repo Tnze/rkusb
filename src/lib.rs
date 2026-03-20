@@ -301,7 +301,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
             return Ok(());
         }
 
-        if data.len() % STORAGE_SECTOR_SIZE != 0 {
+        if !data.len().is_multiple_of(STORAGE_SECTOR_SIZE) {
             return Err(RkUsbError::Usb(rusb::Error::InvalidParam));
         }
 
@@ -322,18 +322,13 @@ impl<T: rusb::UsbContext> RkDevice<T> {
     }
 
     /// Read a contiguous range of sectors from storage starting at the given LBA.
-    pub fn read_lba(
-        &mut self,
-        pos: u32,
-        data: &mut [u8],
-        subcode: u8,
-    ) -> Result<(), RkUsbError> {
+    pub fn read_lba(&mut self, pos: u32, data: &mut [u8], subcode: u8) -> Result<(), RkUsbError> {
         if data.is_empty() {
             debug!("Skipping empty LBA read at start_sector={pos}");
             return Ok(());
         }
 
-        if data.len() % STORAGE_SECTOR_SIZE != 0 {
+        if !data.len().is_multiple_of(STORAGE_SECTOR_SIZE) {
             return Err(RkUsbError::Usb(rusb::Error::InvalidParam));
         }
 

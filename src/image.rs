@@ -1,6 +1,10 @@
-use std::{fmt::Display, time::Duration};
+use std::{
+    fmt::{Debug, Display, Formatter},
+    time::Duration,
+};
 
 use crc::{Algorithm, Crc};
+use thiserror::Error;
 use zerocopy::{FromBytes, byteorder::little_endian::*};
 
 type Uchar = u8;
@@ -71,8 +75,8 @@ pub struct IDBlockHeader {
     _reserved: [u8; 57],
 }
 
-impl std::fmt::Debug for IDBlockHeader {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for IDBlockHeader {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IDBlockHeader")
             .field("tag", &self.tag.get())
             .field("size", &self.size.get())
@@ -122,13 +126,13 @@ pub struct RkFwHeader {
     pub os_type: Dword,
     pub reserved_1: [u8; 4],
     pub backup_size: Ushort,
-    pub fw_offset_hi_flag: [u8; 2],
+    pub reserved_2: [u8; 2],
     pub fw_offset_hi: Dword,
-    pub reserved_tail: [u8; 41],
+    pub reserved_3: [u8; 41],
 }
 
-impl std::fmt::Debug for RkFwHeader {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for RkFwHeader {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RkFwHeader")
             .field("tag", &self.tag.get())
             .field("size", &self.size.get())
@@ -152,6 +156,21 @@ pub struct BootImage<'data> {
 
 pub struct RkFwImage<'data> {
     data: &'data [u8],
+    fw: &'data [u8],
+    md5: &'data [u8],
+    sign: Option<&'data [u8]>,
+}
+
+#[derive(Debug, Error)]
+pub enum ImageError {
+    #[error("unknown tag")]
+    UnknownTag,
+    #[error("image data too short")]
+    TooShort,
+    #[error("firmware offset out of range")]
+    FwOutOfRange,
+    #[error("md5 data out of range")]
+    MD5OutOfRange,
 }
 
 impl<'data> BootImage<'data> {
@@ -252,25 +271,47 @@ impl<'data> BootImage<'data> {
 }
 
 impl<'data> RkFwImage<'data> {
-    pub fn new(data: &'data [u8]) -> Self {
-        Self { data }
+    pub fn new(data: &'data [u8]) -> Result<Self, ImageError> {
+        // Layout: [ header | fw | md5(32) | optional sign(128+) ]
+        let header = data
+            .get(0..std::mem::size_of::<RkFwHeader>())
+            .ok_or(ImageError::TooShort)?
+            .as_ptr() as *const RkFwHeader;
+        if unsafe { (*header).tag } != RKFW_TAG {
+            return Err(ImageError::UnknownTag);
+        }
+        let (fw_offset, fw_end) = unsafe {
+            let fw_size = (*header).fw_size.get() as usize;
+            let mut fw_offset = (*header).fw_offset.get() as usize;
+            if (*header).reserved_2 == [b'H', b'I'] {
+                fw_offset |= ((*header).fw_offset_hi.get() as usize) << 32;
+            }
+            let fw_end = fw_offset
+                .checked_add(fw_size)
+                .ok_or(ImageError::FwOutOfRange)?;
+            (fw_offset, fw_end)
+        };
+        let fw = data
+            .get(fw_offset..fw_end)
+            .ok_or(ImageError::FwOutOfRange)?;
+        // NOTE: We believe anchoring MD5 at `fw_end` is more reasonable than
+        // the legacy C++ behavior, which may fall back to file-end in some
+        // cases and pick the wrong MD5 when extra trailing bytes are present.
+        let md5_end = fw_end.checked_add(32).ok_or(ImageError::MD5OutOfRange)?;
+        let md5 = data.get(fw_end..md5_end).ok_or(ImageError::MD5OutOfRange)?;
+        // Ignoring signature if length < 128, should we report an error?
+        let sign = data.get(md5_end..).filter(|x| x.len() >= 128);
+        Ok(Self {
+            data,
+            fw,
+            md5,
+            sign,
+        })
     }
 
     fn header_ptr(&self) -> *const RkFwHeader {
         assert!(self.data.len() > std::mem::size_of::<RkFwHeader>());
         self.data.as_ptr() as *const RkFwHeader
-    }
-
-    fn fw_end_offset(&self) -> u64 {
-        let header = self.header_ptr();
-        unsafe {
-            if (*header).fw_offset_hi_flag == [b'H', b'I'] {
-                let fw_hi = (*header).fw_offset_hi.get() as u64;
-                (fw_hi << 32) + (*header).fw_offset.get() as u64 + (*header).fw_size.get() as u64
-            } else {
-                (*header).fw_offset.get() as u64 + (*header).fw_size.get() as u64
-            }
-        }
     }
 
     pub fn boot_data(&self) -> Option<BootImage<'data>> {
@@ -282,54 +323,52 @@ impl<'data> RkFwImage<'data> {
             self.data.get(offset..end).map(BootImage::new)
         }
     }
+}
 
-    fn md5_and_sign(&self) -> Option<(&'data [u8], Option<&'data [u8]>)> {
-        let fw_end = self.fw_end_offset() as usize;
-        if fw_end > self.data.len() {
-            return None;
+impl Debug for BootImage<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let idblock = unsafe { std::ptr::read_unaligned(self.get_idblock()) };
+        let mut ds = f.debug_struct("BootImage");
+        ds.field("header", &idblock);
+
+        for (entry_count, entry_type) in [
+            (idblock.entry_741_count, RkBootEntryType::Entry471),
+            (idblock.entry_742_count, RkBootEntryType::Entry472),
+            (idblock.loader_entry_count, RkBootEntryType::EntryLoader),
+        ] {
+            for entry_index in 0..entry_count {
+                unsafe {
+                    let RkBootEntryHeader {
+                        size,
+                        r#type,
+                        name,
+                        data_offset,
+                        data_size,
+                        data_delay,
+                    } = *self.get_entry_header(entry_type, entry_index as usize);
+                    ds.field(&String::from_utf16_lossy(&name[..]), &format_args!("{type:?} {{ size: {size:#X}, data_offset: {data_offset:#X}, data_size: {data_size:#X}, data_delay: {data_delay} }}"));
+                }
+            }
         }
 
-        let trailer_size = self.data.len() - fw_end;
-        if trailer_size >= 160 {
-            let md5 = self.data.get(fw_end..fw_end + 32)?;
-            let sign = self.data.get(fw_end + 32..);
-            Some((md5, sign))
-        } else {
-            let md5 = self.data.get(self.data.len().checked_sub(32)?..)?;
-            Some((md5, None))
-        }
+        ds.finish()
     }
 }
 
-impl std::fmt::Debug for RkFwImage<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Debug for RkFwImage<'_> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let header = unsafe { std::ptr::read_unaligned(self.header_ptr()) };
-        let (md5, sign_size) = match self.md5_and_sign() {
-            Some((md5, Some(sig))) => (Some(md5), sig.len()),
-            Some((md5, None)) => (Some(md5), 0),
-            None => (None, 0),
-        };
-        let embedded_boot = self.boot_data();
-        let embedded_boot_tag = embedded_boot
-            .as_ref()
-            .and_then(|boot| boot.data.get(0..4))
-            .map(|bytes| unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const Dword).get() });
-
         f.debug_struct("RkFwImage")
             .field("header", &header)
             .field("os_type", &format_args!("{:#X}", header.os_type.get()))
-            .field("backup_size", &format_args!("{:#X}", header.backup_size.get()))
             .field(
-                "fw_end_offset",
-                &format_args!("{:#X}", self.fw_end_offset()),
+                "backup_size",
+                &format_args!("{:#X}", header.backup_size.get()),
             )
-            .field("sign_data_size", &format_args!("{:#X}", sign_size))
-            .field("md5", &format_args!("{:02X?}", md5))
-            .field(
-                "embedded_boot_size",
-                &format_args!("{:#X}", embedded_boot.as_ref().map_or(0, |x| x.data.len())),
-            )
-            .field("embedded_boot_tag", &embedded_boot_tag)
+            .field("fw_len", &self.fw.len())
+            .field("md5", &String::from_utf8_lossy(self.md5))
+            .field("sign_len", &self.sign.map(hex::encode))
+            .field("boot", &self.boot_data())
             .finish()
     }
 }
