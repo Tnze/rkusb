@@ -6,6 +6,7 @@ mod info;
 mod lba;
 mod ls;
 mod rst;
+mod storage;
 mod ul;
 mod util;
 mod wait;
@@ -40,6 +41,8 @@ enum Commands {
     Lba(lba::Args),
     #[command(about = "Wait for device to be available")]
     Wait(wait::Args),
+    #[command(about = "Query or switch current storage", visible_alias("st"))]
+    Storage(storage::Args),
     #[command(
         about = "Upgrade loader by writing generated IDBlock",
         visible_alias("ul")
@@ -58,6 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Reset(args) => rst::exec(rusb::Context::new()?, args)?,
         Commands::Lba(args) => lba::exec(rusb::Context::new()?, args)?,
         Commands::Wait(args) => wait::exec(rusb::Context::new()?, args)?,
+        Commands::Storage(args) => storage::exec(rusb::Context::new()?, args)?,
         Commands::UpgradeLoader(args) => ul::exec(rusb::Context::new()?, args)?,
     }
     Ok(())

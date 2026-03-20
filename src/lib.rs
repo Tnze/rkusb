@@ -1,4 +1,8 @@
-use std::{cell::OnceCell, thread::sleep, time::Duration};
+use std::{
+    cell::OnceCell,
+    thread::sleep,
+    time::{Duration, Instant},
+};
 
 use crc::{CRC_16_IBM_3740, Crc};
 use log::{debug, info, trace};
@@ -10,7 +14,7 @@ use crate::image::{RkBootEntryType, RkBootImage};
 const USB_TIMEOUT: Duration = Duration::from_secs(5);
 const STORAGE_SECTOR_SIZE: usize = 512;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum RkUsbError {
     #[error("USB error: {0}")]
     Usb(#[from] rusb::Error),
@@ -159,21 +163,30 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         cbw: &usb::Cbw<usb::Cbwcb>,
         data_out: Option<&[u8]>,
         data_in: Option<&mut [u8]>,
+        timeout: Duration,
     ) -> Result<(), RkUsbError> {
+        let deadline = Instant::now() + timeout;
+        let remaining = || {
+            deadline
+                .checked_duration_since(Instant::now())
+                .filter(|x| !x.is_zero())
+                .ok_or(RkUsbError::Usb(rusb::Error::Timeout))
+        };
+
         let opcode = cbw.cb.oper_code;
         let cbw_tag = cbw.tag;
         let cbw_len = cbw.data_transfer_length;
         trace!("Sending CBW opcode={opcode:#04X} tag={cbw_tag:#010X} len={cbw_len}");
         let n = self
             .device
-            .write_bulk(self.bulk_out, cbw.as_bytes(), USB_TIMEOUT)?;
+            .write_bulk(self.bulk_out, cbw.as_bytes(), remaining()?)?;
         if n != std::mem::size_of::<usb::Cbw<usb::Cbwcb>>() {
             return Err(RkUsbError::Usb(rusb::Error::Io));
         }
 
         if let Some(buf) = data_out {
             trace!("Writing data stage bytes={}", buf.len());
-            let n = self.device.write_bulk(self.bulk_out, buf, USB_TIMEOUT)?;
+            let n = self.device.write_bulk(self.bulk_out, buf, remaining()?)?;
             if n != buf.len() {
                 return Err(RkUsbError::Usb(rusb::Error::Io));
             }
@@ -181,7 +194,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
 
         if let Some(buf) = data_in {
             trace!("Reading data stage bytes={}", buf.len());
-            let n = self.device.read_bulk(self.bulk_in, buf, USB_TIMEOUT)?;
+            let n = self.device.read_bulk(self.bulk_in, buf, remaining()?)?;
             if n != buf.len() {
                 return Err(RkUsbError::Usb(rusb::Error::Io));
             }
@@ -190,7 +203,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         let mut csw_buf = [0u8; std::mem::size_of::<usb::Csw>()];
         let n = self
             .device
-            .read_bulk(self.bulk_in, &mut csw_buf, USB_TIMEOUT)?;
+            .read_bulk(self.bulk_in, &mut csw_buf, remaining()?)?;
         if n != csw_buf.len() {
             return Err(RkUsbError::InvalidCsw);
         }
@@ -293,11 +306,17 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         info!("Resetting device with subcode={subcode:#04X}");
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0xff); // DEVICE_RESET
         cbw.cb.reserved = subcode;
-        self.cbw_transaction(&cbw, None, None)
+        self.cbw_transaction(&cbw, None, None, USB_TIMEOUT)
     }
 
     /// Write a contiguous sector-aligned buffer to storage starting at the given LBA.
-    pub fn write_lba(&mut self, pos: u32, data: &[u8], subcode: u8) -> Result<(), RkUsbError> {
+    pub fn write_lba(
+        &mut self,
+        pos: u32,
+        data: &[u8],
+        subcode: u8,
+        timeout: Duration,
+    ) -> Result<(), RkUsbError> {
         if data.is_empty() {
             debug!("Skipping empty LBA write at start_sector={pos}");
             return Ok(());
@@ -318,13 +337,19 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         cbw.cb.address = pos.to_be();
         cbw.cb.length = sector_count_u16.to_be();
         cbw.cb.reserved = subcode;
-        self.cbw_transaction(&cbw, Some(data), None)?;
+        self.cbw_transaction(&cbw, Some(data), None, timeout)?;
 
         Ok(())
     }
 
     /// Read a contiguous range of sectors from storage starting at the given LBA.
-    pub fn read_lba(&mut self, pos: u32, data: &mut [u8], subcode: u8) -> Result<(), RkUsbError> {
+    pub fn read_lba(
+        &mut self,
+        pos: u32,
+        data: &mut [u8],
+        subcode: u8,
+        timeout: Duration,
+    ) -> Result<(), RkUsbError> {
         if data.is_empty() {
             debug!("Skipping empty LBA read at start_sector={pos}");
             return Ok(());
@@ -346,11 +371,16 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         cbw.cb.length = sector_count_u16.to_be();
         cbw.cb.reserved = subcode;
 
-        self.cbw_transaction(&cbw, None, Some(data))
+        self.cbw_transaction(&cbw, None, Some(data), timeout)
     }
 
     /// Erase a contiguous range of sectors from storage starting at the given LBA.
-    pub fn erase_lba(&mut self, pos: u32, sector_count: u16) -> Result<(), RkUsbError> {
+    pub fn erase_lba(
+        &mut self,
+        pos: u32,
+        sector_count: u16,
+        timeout: Duration,
+    ) -> Result<(), RkUsbError> {
         if sector_count == 0 {
             debug!("Skipping empty LBA erase at start_sector={pos}");
             return Ok(());
@@ -361,16 +391,16 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x25); // ERASE_LBA
         cbw.cb.address = pos.to_be();
         cbw.cb.length = sector_count.to_be();
-        self.cbw_transaction(&cbw, None, None)
+        self.cbw_transaction(&cbw, None, None, timeout)
     }
 
     /// Read device capability bytes.
-    pub fn read_capability(&mut self) -> Result<[u8; 8], RkUsbError> {
+    pub fn read_capability(&mut self, timeout: Duration) -> Result<[u8; 8], RkUsbError> {
         debug!("Reading device capability");
         let mut capability = [0u8; 8];
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0xAA); // READ_CAPABILITY
         cbw.data_transfer_length = std::mem::size_of_val(&capability) as u32;
-        self.cbw_transaction(&cbw, None, Some(&mut capability))?;
+        self.cbw_transaction(&cbw, None, Some(&mut capability), timeout)?;
         Ok(capability)
     }
 
@@ -383,7 +413,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x2B); // READ_STORAGE
         cbw.data_transfer_length = 4;
         let mut storage_bits_buf = [0u8; 4];
-        self.cbw_transaction(&cbw, None, Some(&mut storage_bits_buf))?;
+        self.cbw_transaction(&cbw, None, Some(&mut storage_bits_buf), USB_TIMEOUT)?;
         let storage_bits = u32::from_le_bytes(storage_bits_buf);
         let selected = (storage_bits != 0).then_some(storage_bits.trailing_zeros() as u8);
         debug!("Storage bitmap={storage_bits:#010X}, selected={selected:?}");
@@ -395,7 +425,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         info!("Switching storage to code={storage}");
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x2A); // CHANGE_STORAGE
         cbw.cb.reserved = storage;
-        self.cbw_transaction(&cbw, None, None)
+        self.cbw_transaction(&cbw, None, None, USB_TIMEOUT)
     }
 
     /// Change device storage using a typed storage selector.

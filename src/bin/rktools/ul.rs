@@ -1,4 +1,7 @@
-use std::fs::File;
+use std::{
+    fs::File,
+    time::{Duration, Instant},
+};
 
 use memmap2::Mmap;
 use rkusb::{
@@ -10,7 +13,7 @@ use thiserror::Error;
 
 use crate::{
     common::{self, DeviceSelectionError},
-    util::{parse_u8, parse_u32},
+    util::{parse_u8, parse_u32, timeout_to},
 };
 
 const SECTOR_SIZE: usize = 512;
@@ -27,8 +30,15 @@ pub struct Args {
     bus: Option<u8>,
     #[arg(long, help = "Address of the device")]
     addr: Option<u8>,
-    #[arg(long, help = "Wait for device with timeout (e.g., 30s, 1m)")]
-    wait: Option<String>,
+    #[arg(long, value_parser = humantime::parse_duration, help = "Wait for device with timeout (e.g., 30s, 1m)")]
+    wait: Option<Duration>,
+    #[arg(
+        long,
+        value_parser = humantime::parse_duration,
+        default_value = "300s",
+        help = "Total timeout for this upgrade-loader command"
+    )]
+    timeout: Duration,
     #[arg(
         short,
         long,
@@ -60,12 +70,7 @@ pub enum UpgradeLoaderError {
 }
 
 pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), UpgradeLoaderError> {
-    let timeout = args
-        .wait
-        .as_ref()
-        .map(|s| humantime::parse_duration(s))
-        .transpose()?;
-    let selected_device = common::find_device(&usb_ctx, args.bus, args.addr, timeout)?;
+    let selected_device = common::find_device(&usb_ctx, args.bus, args.addr, args.wait)?;
     let mut rkdev = RkDevice::open(&selected_device)?;
 
     let file = File::open(&args.path)?;
@@ -75,11 +80,15 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), UpgradeLoaderErro
     let loader_code = find_loader_entry(&boot_img, ENTRY_FLASH_BOOT)?;
     let loader_data = find_loader_entry(&boot_img, ENTRY_FLASH_DATA)?;
     let loader_head = find_loader_entry(&boot_img, ENTRY_FLASH_HEAD).ok();
-
     let rc4_enabled = unsafe { (*boot_img.boot_header_ptr()).rc4_flag != 0 };
 
+    let timeout = timeout_to(
+        Instant::now() + args.timeout,
+        RkUsbError::Usb(rusb::Error::Timeout),
+    );
+
     let idblock_data = if let Some(loader_head) = loader_head {
-        let capability = rkdev.read_capability()?;
+        let capability = rkdev.read_capability(timeout()?)?;
         if (capability[1] & 1) == 0 {
             return Err(UpgradeLoaderError::FlashHeadNotSupported);
         }
@@ -88,7 +97,7 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), UpgradeLoaderErro
         idblock::build_idblock(loader_data, loader_code, rc4_enabled)?
     };
 
-    rkdev.write_lba(args.lba, &idblock_data, args.subcode)?;
+    rkdev.write_lba(args.lba, &idblock_data, args.subcode, timeout()?)?;
     println!(
         "Upgrade loader OK, wrote {} sectors to LBA {}",
         idblock_data.len() / SECTOR_SIZE,

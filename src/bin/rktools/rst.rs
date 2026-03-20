@@ -1,4 +1,5 @@
 use rkusb::RkDevice;
+use std::time::Duration;
 
 use crate::common;
 
@@ -16,16 +17,12 @@ pub struct Args {
     )]
     subcode: u8,
     #[arg(long, help = "Wait for device with timeout (e.g., 30s, 1m)")]
-    wait: Option<String>,
+    #[arg(long, value_parser = humantime::parse_duration, help = "Wait for device with timeout (e.g., 30s, 1m)")]
+    wait: Option<Duration>,
 }
 
 pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    let timeout = args
-        .wait
-        .as_ref()
-        .map(|s| humantime::parse_duration(s))
-        .transpose()?;
-    let selected_device = common::find_device(&usb_ctx, args.bus, args.addr, timeout)?;
+    let selected_device = common::find_device(&usb_ctx, args.bus, args.addr, args.wait)?;
 
     let mut rkdev = RkDevice::open(&selected_device)?;
     rkdev.reset_device(args.subcode)?;

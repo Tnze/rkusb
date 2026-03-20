@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::time::Duration;
 
 use memmap2::Mmap;
 use rkusb::{RkDevice, RkUsbError};
@@ -14,16 +15,18 @@ pub struct Args {
     bus: Option<u8>,
     #[arg(long, help = "Address of the device")]
     addr: Option<u8>,
-    #[arg(long, help = "Wait for device with timeout (e.g., 30s, 1m)")]
-    wait: Option<String>,
+    #[arg(
+        long,
+        value_parser = humantime::parse_duration,
+        help = "Wait for device with timeout (e.g., 30s, 1m)"
+    )]
+    wait: Option<Duration>,
 }
 
 #[derive(Error, Debug)]
 pub enum DownloadBootError {
     #[error("Device selection error: {0}")]
     DeviceSelection(#[from] DeviceSelectionError),
-    #[error("Parse timeout: {0}")]
-    ParseTimeout(#[from] humantime::DurationError),
     #[error("RkUsb error: {0}")]
     RkUsb(#[from] RkUsbError),
     #[error("IO error: {0}")]
@@ -31,12 +34,7 @@ pub enum DownloadBootError {
 }
 
 pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), DownloadBootError> {
-    let timeout = args
-        .wait
-        .as_ref()
-        .map(|s| humantime::parse_duration(s))
-        .transpose()?;
-    let selected_device = common::find_device(&usb_ctx, args.bus, args.addr, timeout)?;
+    let selected_device = common::find_device(&usb_ctx, args.bus, args.addr, args.wait)?;
     let mut device = RkDevice::open(&selected_device)?;
     let file = File::open(&args.path)?;
     let mmap = unsafe { Mmap::map(&file)? };
