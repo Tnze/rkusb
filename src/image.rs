@@ -151,8 +151,12 @@ impl Debug for RkFwHeader {
     }
 }
 
+#[allow(non_snake_case)]
 pub struct RkBootImage<'data> {
     data: &'data [u8],
+    entries_471: Vec<*const RkBootEntry>,
+    entries_472: Vec<*const RkBootEntry>,
+    entries_loader: Vec<*const RkBootEntry>,
 }
 
 pub struct RkFwImage<'data> {
@@ -168,6 +172,10 @@ pub enum ImageError {
     UnknownTag,
     #[error("image data too short")]
     TooShort,
+    #[error("boot entry table offset out of range")]
+    BootEntryOutOfRange,
+    #[error("boot entry header too short")]
+    BootEntryTooShort,
     #[error("firmware offset out of range")]
     FwOutOfRange,
     #[error("md5 data out of range")]
@@ -175,48 +183,61 @@ pub enum ImageError {
 }
 
 impl<'data> RkBootImage<'data> {
-    pub fn new(data: &'data [u8]) -> Self {
-        Self { data }
+    pub fn new(data: &'data [u8]) -> Result<Self, ImageError> {
+        let header = data
+            .get(0..std::mem::size_of::<RkBootHeader>())
+            .ok_or(ImageError::TooShort)?
+            .as_ptr() as *const RkBootHeader;
+
+        unsafe {
+            if !matches!((*header).tag.get(), RKBOOT_TAG | RKLDR_TAG) {
+                return Err(ImageError::UnknownTag);
+            }
+
+            let parse_entries =
+                |offset: Dword, count: Uchar, size: Uchar| -> Result<_, ImageError> {
+                    if (size as usize) < (std::mem::size_of::<RkBootEntry>()) {
+                        return Err(ImageError::BootEntryTooShort);
+                    }
+                    let offset = offset.get() as usize;
+                    let end = ((size as usize) * (count as usize))
+                        .checked_add(offset)
+                        .ok_or(ImageError::BootEntryOutOfRange)?;
+                    Ok(data
+                        .get(offset..end)
+                        .ok_or(ImageError::BootEntryOutOfRange)?
+                        .chunks_exact(size as usize)
+                        .map(|chunk| chunk.as_ptr() as *const RkBootEntry))
+                };
+
+            let entries471 = parse_entries(
+                (*header).entry_741_offset,
+                (*header).entry_741_count,
+                (*header).entry_741_size,
+            )?;
+            let entries472 = parse_entries(
+                (*header).entry_742_offset,
+                (*header).entry_742_count,
+                (*header).entry_742_size,
+            )?;
+            let entries_loader = parse_entries(
+                (*header).loader_entry_offset,
+                (*header).loader_entry_count,
+                (*header).loader_entry_size,
+            )?;
+
+            Ok(Self {
+                data,
+                entries_471: entries471.collect(),
+                entries_472: entries472.collect(),
+                entries_loader: entries_loader.collect(),
+            })
+        }
     }
 
     pub fn boot_header_ptr(&self) -> *const RkBootHeader {
         assert!(self.data.len() > std::mem::size_of::<RkBootHeader>());
         self.data.as_ptr() as *const RkBootHeader
-    }
-
-    pub fn get_entry_header(
-        &self,
-        entry_type: RkBootEntryType,
-        entry_index: usize,
-    ) -> *const RkBootEntry {
-        let header = self.boot_header_ptr();
-        unsafe {
-            let (offset, count, size) = match entry_type {
-                RkBootEntryType::Entry471 => (
-                    (*header).entry_741_offset,
-                    (*header).entry_741_count,
-                    (*header).entry_741_size,
-                ),
-                RkBootEntryType::Entry472 => (
-                    (*header).entry_742_offset,
-                    (*header).entry_742_count,
-                    (*header).entry_742_size,
-                ),
-                RkBootEntryType::EntryLoader => (
-                    (*header).loader_entry_offset,
-                    (*header).loader_entry_count,
-                    (*header).loader_entry_size,
-                ),
-            };
-            assert!(
-                entry_index < count as usize,
-                "Index {entry_index} out of range: [0, {count})"
-            );
-            let offset = offset.get() as usize + (size as usize) * entry_index;
-            let entry = self.data.as_ptr().add(offset);
-
-            entry as *const RkBootEntry
-        }
     }
 
     pub fn get_entry_data(&self, offset: usize, size: usize) -> &'data [u8] {
@@ -236,28 +257,26 @@ impl<'data> RkBootImage<'data> {
         &self,
         typ: RkBootEntryType,
     ) -> impl Iterator<Item = (String, &'data [u8], Duration)> {
-        let boot_header = self.boot_header_ptr();
-        unsafe {
-            let count = match typ {
-                RkBootEntryType::Entry471 => (*boot_header).entry_741_count,
-                RkBootEntryType::Entry472 => (*boot_header).entry_742_count,
-                RkBootEntryType::EntryLoader => (*boot_header).loader_entry_count,
-            };
-            (0..count).map(move |i| {
-                let entry_header = self.get_entry_header(typ, i as usize);
-                let name = (*entry_header).name;
-                let name = String::from_utf16_lossy(&name[..]);
-                let name = name.trim_end_matches('\0').to_owned();
-                let offset = (*entry_header).data_offset.get() as usize;
-                let size = (*entry_header).data_size.get() as usize;
-                let delay = (*entry_header).data_delay.get() as u64;
-                (
-                    name,
-                    &self.data[offset..offset + size],
-                    Duration::from_millis(delay),
-                )
-            })
+        match typ {
+            RkBootEntryType::Entry471 => &self.entries_471,
+            RkBootEntryType::Entry472 => &self.entries_472,
+            RkBootEntryType::EntryLoader => &self.entries_loader,
         }
+        .iter()
+        .map(move |entry_ptr| {
+            let entry = unsafe { std::ptr::read_unaligned(*entry_ptr) };
+            let name = entry.name;
+            let name = String::from_utf16_lossy(&name[..]);
+            let name = name.trim_end_matches('\0').to_owned();
+            let offset = entry.data_offset.get() as usize;
+            let size = entry.data_size.get() as usize;
+            let delay = entry.data_delay.get() as u64;
+            (
+                name,
+                &self.data[offset..offset + size],
+                Duration::from_millis(delay),
+            )
+        })
     }
 }
 
@@ -305,13 +324,15 @@ impl<'data> RkFwImage<'data> {
         self.data.as_ptr() as *const RkFwHeader
     }
 
-    pub fn boot_data(&self) -> Option<RkBootImage<'data>> {
+    pub fn boot_data(&self) -> Result<RkBootImage<'data>, ImageError> {
         let header = self.header_ptr();
         unsafe {
             let offset = (*header).boot_offset.get() as usize;
-            let size = (*header).boot_size.get() as usize;
-            let end = offset.checked_add(size)?;
-            self.data.get(offset..end).map(RkBootImage::new)
+            let end = offset + (*header).boot_size.get() as usize;
+            self.data
+                .get(offset..end)
+                .ok_or(ImageError::BootEntryOutOfRange)
+                .and_then(RkBootImage::new)
         }
     }
 }
@@ -322,25 +343,22 @@ impl Debug for RkBootImage<'_> {
         let mut ds = f.debug_struct("RkBootImage");
         ds.field("header", &boot_header);
 
-        for (entry_count, entry_type) in [
-            (boot_header.entry_741_count, RkBootEntryType::Entry471),
-            (boot_header.entry_742_count, RkBootEntryType::Entry472),
-            (boot_header.loader_entry_count, RkBootEntryType::EntryLoader),
-        ] {
-            for entry_index in 0..entry_count {
-                unsafe {
-                    let RkBootEntry {
-                        size,
-                        r#type,
-                        name,
-                        data_offset,
-                        data_size,
-                        data_delay,
-                    } = *self.get_entry_header(entry_type, entry_index as usize);
-                    let name = String::from_utf16_lossy(&name[..]);
-                    let name = name.trim_end_matches('\0').to_owned();
-                    ds.field(&name, &format_args!("{type:?} {{ size: {size:#X}, data_offset: {data_offset:#X}, data_size: {data_size:#X}, data_delay: {data_delay} }}"));
-                }
+        for entry_header in [&self.entries_471, &self.entries_472, &self.entries_loader]
+            .into_iter()
+            .flatten()
+        {
+            unsafe {
+                let RkBootEntry {
+                    size,
+                    r#type,
+                    name,
+                    data_offset,
+                    data_size,
+                    data_delay,
+                } = **entry_header;
+                let name = String::from_utf16_lossy(&name[..]);
+                let name = name.trim_end_matches('\0').to_owned();
+                ds.field(&name, &format_args!("{type:?} {{ size: {size:#X}, data_offset: {data_offset:#X}, data_size: {data_size:#X}, data_delay: {data_delay} }}"));
             }
         }
 

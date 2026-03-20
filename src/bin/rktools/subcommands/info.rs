@@ -27,7 +27,7 @@ pub fn exec(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     match zerocopy::little_endian::U32::from_bytes(tag).get() {
         RKLDR_TAG | RKBOOT_TAG => {
-            let boot_img = RkBootImage::new(&mmap[..]);
+            let boot_img = RkBootImage::new(&mmap[..])?;
             println!("{boot_img:#?}");
         }
         RKFW_TAG => {

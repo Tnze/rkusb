@@ -7,7 +7,7 @@ use memmap2::Mmap;
 use rkusb::{
     RkDevice, RkUsbError,
     idblock::{self, IdBlockError},
-    image::{RkBootEntryType, RkBootImage},
+    image::{ImageError, RkBootEntryType, RkBootImage},
 };
 use thiserror::Error;
 
@@ -63,6 +63,8 @@ pub enum UpgradeLoaderError {
     Io(#[from] std::io::Error),
     #[error("IDBlock build error: {0}")]
     IdBlock(#[from] IdBlockError),
+    #[error("Image parse error: {0}")]
+    Image(#[from] ImageError),
     #[error("loader entry not found: {0}")]
     MissingEntry(&'static str),
     #[error("device does not support upgrading loader with FlashHead")]
@@ -75,7 +77,7 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), UpgradeLoaderErro
 
     let file = File::open(&args.path)?;
     let mmap = unsafe { Mmap::map(&file)? };
-    let boot_img = RkBootImage::new(&mmap);
+    let boot_img = RkBootImage::new(&mmap)?;
 
     let loader_code = find_loader_entry(&boot_img, ENTRY_FLASH_BOOT)?;
     let loader_data = find_loader_entry(&boot_img, ENTRY_FLASH_DATA)?;

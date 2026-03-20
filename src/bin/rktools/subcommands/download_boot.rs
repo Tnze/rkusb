@@ -2,7 +2,7 @@ use std::fs::File;
 use std::time::Duration;
 
 use memmap2::Mmap;
-use rkusb::{RkDevice, RkUsbError};
+use rkusb::{RkDevice, RkUsbError, image::ImageError};
 use thiserror::Error;
 
 use crate::common::{self, DeviceSelectionError};
@@ -31,6 +31,8 @@ pub enum DownloadBootError {
     RkUsb(#[from] RkUsbError),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Image parse error: {0}")]
+    Image(#[from] ImageError),
 }
 
 pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), DownloadBootError> {
@@ -38,6 +40,6 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), DownloadBootError
     let mut device = RkDevice::open(&selected_device)?;
     let file = File::open(&args.path)?;
     let mmap = unsafe { Mmap::map(&file)? };
-    device.download_boot(rkusb::image::RkBootImage::new(&mmap[..]))?;
+    device.download_boot(rkusb::image::RkBootImage::new(&mmap[..])?)?;
     Ok(())
 }
