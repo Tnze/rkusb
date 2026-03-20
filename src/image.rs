@@ -8,6 +8,10 @@ type Ushort = U16;
 type Uint = U32;
 type Dword = U32;
 
+pub const RKFW_TAG: u32 = 0x57464B52;
+pub const RKBOOT_TAG: u32 = 0x544F4F42;
+pub const RKLDR_TAG: u32 = 0x2052444C;
+
 #[derive(FromBytes)]
 #[repr(C, packed)]
 pub struct RkTime {
@@ -101,7 +105,52 @@ pub struct RkBootEntryHeader {
     pub data_delay: Dword,
 }
 
+#[derive(FromBytes)]
+#[repr(C, packed)]
+pub struct RkFwHeader {
+    pub tag: Uint,
+    pub size: Ushort,
+    pub version: Dword,
+    pub merge_version: Dword,
+    pub release_time: RkTime,
+    pub support_chip: RkDeviceType,
+    pub boot_offset: Dword,
+    pub boot_size: Dword,
+    pub fw_offset: Dword,
+    pub fw_size: Dword,
+    pub reserved_0: [u8; 4],
+    pub os_type: Dword,
+    pub reserved_1: [u8; 4],
+    pub backup_size: Ushort,
+    pub fw_offset_hi_flag: [u8; 2],
+    pub fw_offset_hi: Dword,
+    pub reserved_tail: [u8; 41],
+}
+
+impl std::fmt::Debug for RkFwHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RkFwHeader")
+            .field("tag", &self.tag.get())
+            .field("size", &self.size.get())
+            .field("version", &self.version.get())
+            .field("merge_version", &self.merge_version.get())
+            .field("release_time", &self.release_time.to_string())
+            .field("support_chip", &self.support_chip.get())
+            .field("boot_offset", &self.boot_offset.get())
+            .field("boot_size", &self.boot_size.get())
+            .field("fw_offset", &self.fw_offset.get())
+            .field("fw_size", &self.fw_size.get())
+            .field("os_type", &self.os_type.get())
+            .field("backup_size", &self.backup_size.get())
+            .finish()
+    }
+}
+
 pub struct BootImage<'data> {
+    data: &'data [u8],
+}
+
+pub struct RkFwImage<'data> {
     data: &'data [u8],
 }
 
@@ -155,7 +204,8 @@ impl<'data> BootImage<'data> {
     }
 
     pub fn get_crc32(&self) -> u32 {
-        u32::from_le_bytes(*self.data.split_last_chunk::<4>().unwrap().1)
+        let crc_bytes = self.data.split_last_chunk::<4>().unwrap().1;
+        unsafe { std::ptr::read_unaligned(crc_bytes.as_ptr() as *const Dword).get() }
     }
 
     pub fn calculate_crc32(&self) -> u32 {
@@ -198,5 +248,88 @@ impl<'data> BootImage<'data> {
                 )
             })
         }
+    }
+}
+
+impl<'data> RkFwImage<'data> {
+    pub fn new(data: &'data [u8]) -> Self {
+        Self { data }
+    }
+
+    fn header_ptr(&self) -> *const RkFwHeader {
+        assert!(self.data.len() > std::mem::size_of::<RkFwHeader>());
+        self.data.as_ptr() as *const RkFwHeader
+    }
+
+    fn fw_end_offset(&self) -> u64 {
+        let header = self.header_ptr();
+        unsafe {
+            if (*header).fw_offset_hi_flag == [b'H', b'I'] {
+                let fw_hi = (*header).fw_offset_hi.get() as u64;
+                (fw_hi << 32) + (*header).fw_offset.get() as u64 + (*header).fw_size.get() as u64
+            } else {
+                (*header).fw_offset.get() as u64 + (*header).fw_size.get() as u64
+            }
+        }
+    }
+
+    pub fn boot_data(&self) -> Option<BootImage<'data>> {
+        let header = self.header_ptr();
+        unsafe {
+            let offset = (*header).boot_offset.get() as usize;
+            let size = (*header).boot_size.get() as usize;
+            let end = offset.checked_add(size)?;
+            self.data.get(offset..end).map(BootImage::new)
+        }
+    }
+
+    fn md5_and_sign(&self) -> Option<(&'data [u8], Option<&'data [u8]>)> {
+        let fw_end = self.fw_end_offset() as usize;
+        if fw_end > self.data.len() {
+            return None;
+        }
+
+        let trailer_size = self.data.len() - fw_end;
+        if trailer_size >= 160 {
+            let md5 = self.data.get(fw_end..fw_end + 32)?;
+            let sign = self.data.get(fw_end + 32..);
+            Some((md5, sign))
+        } else {
+            let md5 = self.data.get(self.data.len().checked_sub(32)?..)?;
+            Some((md5, None))
+        }
+    }
+}
+
+impl std::fmt::Debug for RkFwImage<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let header = unsafe { std::ptr::read_unaligned(self.header_ptr()) };
+        let (md5, sign_size) = match self.md5_and_sign() {
+            Some((md5, Some(sig))) => (Some(md5), sig.len()),
+            Some((md5, None)) => (Some(md5), 0),
+            None => (None, 0),
+        };
+        let embedded_boot = self.boot_data();
+        let embedded_boot_tag = embedded_boot
+            .as_ref()
+            .and_then(|boot| boot.data.get(0..4))
+            .map(|bytes| unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const Dword).get() });
+
+        f.debug_struct("RkFwImage")
+            .field("header", &header)
+            .field("os_type", &format_args!("{:#X}", header.os_type.get()))
+            .field("backup_size", &format_args!("{:#X}", header.backup_size.get()))
+            .field(
+                "fw_end_offset",
+                &format_args!("{:#X}", self.fw_end_offset()),
+            )
+            .field("sign_data_size", &format_args!("{:#X}", sign_size))
+            .field("md5", &format_args!("{:02X?}", md5))
+            .field(
+                "embedded_boot_size",
+                &format_args!("{:#X}", embedded_boot.as_ref().map_or(0, |x| x.data.len())),
+            )
+            .field("embedded_boot_tag", &embedded_boot_tag)
+            .finish()
     }
 }

@@ -4,7 +4,9 @@ use std::{
 };
 
 use memmap2::Mmap;
-use rkusb::image::{BootImage, RkBootEntryHeader, RkBootEntryType};
+use rkusb::image::{
+    BootImage, RKLDR_TAG, RKBOOT_TAG, RKFW_TAG, RkBootEntryHeader, RkBootEntryType, RkFwImage,
+};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -22,7 +24,8 @@ pub fn exec(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     file.read_exact(&mut tag)?;
 
     match zerocopy::little_endian::U32::from_bytes(tag).get() {
-        0x2052444C => ldr_info(&mut file)?,
+        RKLDR_TAG | RKBOOT_TAG => ldr_info(&mut file)?,
+        RKFW_TAG => rkfw_info(&mut file)?,
         x => println!("Unknown tag: {x:#04X}"),
     }
     Ok(())
@@ -33,7 +36,28 @@ fn ldr_info(file: &mut File) -> Result<(), Box<dyn std::error::Error>> {
     // Safety: the file is locked so no-one can modify it.
     let mmap = unsafe { Mmap::map(&*file)? };
     let boot_img = BootImage::new(&mmap[..]);
+    dump_boot_image(&boot_img);
 
+    // drop(mmap);
+    // file.unlock()?;
+    Ok(())
+}
+
+fn rkfw_info(file: &mut File) -> Result<(), Box<dyn std::error::Error>> {
+    let mmap = unsafe { Mmap::map(&*file)? };
+    let fw_img = RkFwImage::new(&mmap[..]);
+    println!("{:#?}", fw_img);
+
+    if let Some(boot_img) = fw_img.boot_data() {
+        dump_boot_image(&boot_img);
+    } else {
+        println!("Embedded boot image: invalid range");
+    }
+
+    Ok(())
+}
+
+fn dump_boot_image(boot_img: &BootImage<'_>) {
     unsafe {
         let idblock = boot_img.get_idblock();
         println!("{:#X?}", std::ptr::read_unaligned(idblock));
@@ -57,10 +81,6 @@ fn ldr_info(file: &mut File) -> Result<(), Box<dyn std::error::Error>> {
         "CRC32 IsMatch: {}, Expected: {expected_crc32:#X}, Calculated: {calculated_ccrc32:#X}",
         expected_crc32 == calculated_ccrc32
     );
-
-    // drop(mmap);
-    // file.unlock()?;
-    Ok(())
 }
 
 unsafe fn ldr_entry_info(entry: *const RkBootEntryHeader, idx: usize) {
