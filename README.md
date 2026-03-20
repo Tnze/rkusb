@@ -21,7 +21,8 @@ The project aims to be a clean, memory-safe, cross-platform replacement for the 
 
 ## Supported Devices
 
-The following Rockchip SoC families are recognised automatically by USB VID/PID:
+The following Rockchip SoC families are recognised automatically by USB VID/PID.
+Most of these chips have **not been tested** — the primary development and test platform is **RK3588S2**.
 
 | Family | Modes |
 |--------|-------|
@@ -47,7 +48,6 @@ The following Rockchip SoC families are recognised automatically by USB VID/PID:
 | **CLI ergonomics** | Built with `clap` — rich `--help`, subcommands, aliases, type-safe argument parsing | Ad-hoc argument parsing |
 | **Scripting support** | `wait` subcommand and per-operation timeouts make it suitable for automated flashing scripts | Limited scripting support |
 | **Installation** | `cargo install rkusb` — single static binary, no runtime dependencies beyond `libusb` | Must build from source; depends on system libraries |
-| **License** | MIT | GPL-2.0 |
 
 ## Installation
 
@@ -69,104 +69,33 @@ sudo dnf install libusb1-devel
 
 On Linux you need either `udev` rules granting access to Rockchip USB devices, or run `rktools` as root.
 
+### Windows
+
+On Windows, you must install the **libusb-win32** driver for the Rockchip USB gadget device. The recommended way is to use [Zadig](https://zadig.akeo.ie/): select the Rockchip device from the list and choose the **libusb-win32** driver.
+
+> **Important:** Do **not** select the WinUSB or libusbK drivers — neither supports the `claim_interface` operation required by `rktools`.
+
 ## CLI Usage
 
 ```
 rktools [OPTIONS] <COMMAND>
 ```
 
-### List connected Rockchip devices
-
-```sh
-rktools list
-# or with mode filters:
-rktools list --maskrom --loader
-```
+Use `rktools --help` or `rktools <COMMAND> --help` to see all available options.
 
 ### Download a bootloader image (Maskrom mode)
 
 ```sh
-rktools download-boot rk3588_spl_loader_v1.19.113.bin
-# wait up to 30 s for the device to appear first:
-rktools download-boot --wait 30s rk3588_spl_loader_v1.19.113.bin
+# basic usage
+rktools db rk3588_spl_loader_v1.19.113.bin
+
+# wait up to 30 s for the device to appear first
+rktools db --wait 30s rk3588_spl_loader_v1.19.113.bin
 ```
 
 ### Reset a device
 
 ```sh
-rktools reset              # normal reboot
-rktools reset --subcode 1  # power off
+rktools rst              # normal reboot
+rktools rst --subcode 1  # power off
 ```
-
-### LBA storage operations
-
-```sh
-# Read 2048 sectors starting at LBA 0 into dump.bin
-rktools lba read 0 2048 dump.bin
-
-# Write firmware.img starting at LBA 0
-rktools lba write 0 firmware.img
-
-# Erase 2048 sectors starting at LBA 64
-rktools lba erase 64 2048
-```
-
-### Query / switch storage
-
-```sh
-rktools storage get
-rktools storage set 1   # 1=eMMC, 2=SD, 9=SPI-NOR
-```
-
-### Upgrade loader
-
-```sh
-rktools upgrade-loader rk3588_spl_loader_v1.19.113.bin
-```
-
-### Wait for a device (useful in scripts)
-
-```sh
-rktools wait --timeout 60s && echo "Device ready"
-```
-
-### Increase verbosity
-
-```sh
-rktools -v   <command>   # info
-rktools -vv  <command>   # debug
-rktools -vvv <command>   # trace
-```
-
-## Library Usage
-
-Add to your `Cargo.toml`:
-
-```toml
-[dependencies]
-rkusb = "0.1"
-rusb  = "0.9"
-```
-
-Example:
-
-```rust
-use rkusb::{RkDevice, RkUsbType};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ctx = rusb::Context::new()?;
-    for device in ctx.devices()?.iter() {
-        let desc = device.device_descriptor()?;
-        if let Some(mode) = RkUsbType::detect(&desc) {
-            println!("Found Rockchip device in {:?} mode", mode);
-            let mut rkdev = RkDevice::open(&device)?;
-            // read capability, write LBA, reset, …
-        }
-    }
-    Ok(())
-}
-```
-
-## License
-
-MIT
