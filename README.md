@@ -75,6 +75,8 @@ On Windows, you must install the **libusb-win32** driver for the Rockchip USB ga
 
 > **Important:** Do **not** select the WinUSB or libusbK drivers — neither supports the `claim_interface` operation required by `rktools`.
 
+Installing libusb-win32 will replace Rockchip's official kernel-space driver. If you later need to use Rockchip's official tools, open **Device Manager**, right-click the device, choose **Update driver**, and switch back to the official driver.
+
 ## CLI Usage
 
 ```
