@@ -73,6 +73,7 @@ impl Cbw<Cbwcb> {
             // IN commands (10-byte CDB)
             0x03 /* TEST_BAD_BLOCK */
             | 0x04 /* READ_SECTOR/READ_LBA */
+            | 0x14 /* READ_LBA */
             | 0x17 /* READ_SDRAM */
             | 0x21 /* READ_SPI_FLASH */
             | 0x24 /* READ_NEW_EFUSE */ => {

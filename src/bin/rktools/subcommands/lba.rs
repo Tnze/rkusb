@@ -1,5 +1,5 @@
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     time::{Duration, Instant},
 };
 
@@ -93,7 +93,12 @@ fn exec_read<T: rusb::UsbContext>(
     deadline: Instant,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output_bytes = args.sector_count as usize * SECTOR_SIZE;
-    let file = File::create(&args.path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&args.path)?;
     file.set_len(output_bytes as u64)?;
     // Safety: file length is fixed before mapping and buffer is only written in-bounds.
     let mut mmap = unsafe { MmapMut::map_mut(&file)? };
