@@ -1,6 +1,7 @@
 use clap::{ArgAction, Parser, Subcommand};
 
 mod common;
+mod storage;
 mod subcommands;
 mod util;
 
