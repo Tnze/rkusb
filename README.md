@@ -4,50 +4,21 @@ A Rust library and command-line toolkit for communicating with Rockchip devices 
 
 ## Overview
 
-`rkusb` provides both a reusable Rust library crate and a ready-to-use CLI binary (`rktools`) for interacting with Rockchip SoC-based devices in Maskrom and Loader USB modes. It implements the Rockchip USB protocol used to download boot images, perform raw LBA storage operations, upgrade loaders, and more — all from a host PC over a standard USB cable.
+`rkusb` is a Rust library and CLI tool for working with Rockchip devices over USB.
 
-The project aims to be a clean, memory-safe, cross-platform replacement for the official C++ tool [rkdeveloptool](https://github.com/rockchip-linux/rkdeveloptool), while also exposing its functionality as a first-class Rust library for integration into other tools and workflows.
+It supports common Maskrom and Loader workflows such as downloading a loader, reading and writing storage, switching storage media, parsing Rockchip images, and writing IDBlock data.
 
 ## Features
 
-- **List devices** — enumerate all connected Rockchip USB devices and display their bus/address and mode (Maskrom / Loader / MSC).
-- **Download boot** — send a Rockchip `.bin` loader image to a device in Maskrom mode via the vendor USB control protocol (requests `0x0471` / `0x0472`).
-- **Reset device** — issue a device reset with a configurable subcode (normal reboot or power-off).
-- **LBA operations** — read, write, and erase raw storage sectors by logical block address, with chunked transfer and configurable timeouts.
-- **Wait for device** — block until a Rockchip device appears on the bus, with an optional timeout — useful in scripted flashing pipelines.
-- **Storage selection** — query and switch the active storage medium (eMMC, SD card, SPI-NOR flash).
-- **Upgrade loader** — construct and write an IDBlock from a standard Rockchip loader image directly to storage, supporting both legacy and new (FlashHead) IDBlock formats with optional RC4 encryption.
-- **File info** — inspect Rockchip image files (`.bin`, firmware) and print header metadata.
-
-## Supported Devices
-
-The following Rockchip SoC families are recognised automatically by USB VID/PID.
-Most of these chips have **not been tested** — the primary development and test platform is **RK3588S2**.
-
-| Family | Modes |
-|--------|-------|
-| RK27xx | Maskrom, Loader |
-| RK28xx / RK281x | Maskrom, Loader |
-| RK NANO / SMART / PANDA / CAYMAN / CROWN | Maskrom, Loader |
-| RK29xx / RK292x | Maskrom, Loader |
-| RK30xx / RK30B | Maskrom, Loader |
-| RK31xx | Maskrom, Loader |
-| RK32xx | Maskrom, Loader |
-| Generic `0x2207` vendor devices | Maskrom, Loader |
-| MSC devices | MSC |
-
-## Advantages over rkdeveloptool (C++ original)
-
-| | **rkusb** (this project) | **rkdeveloptool** (C++ original) |
-|---|---|---|
-| **Language** | Rust | C++ |
-| **Memory safety** | Guaranteed by the Rust compiler — no buffer overflows, use-after-free, or data races | Manual memory management; historically had memory-safety issues |
-| **Error handling** | Typed errors with `thiserror`; every failure path is explicit | Mix of return codes, exceptions, and silent failures |
-| **Cross-platform** | Works on Linux, macOS, and Windows via the `rusb`/`libusb` abstraction | Primarily Linux; Windows support requires separate tooling |
-| **Library crate** | Fully usable as a Rust library — import `rkusb` in your own project | Monolithic application; not designed for library use |
-| **CLI ergonomics** | Built with `clap` — rich `--help`, subcommands, aliases, type-safe argument parsing | Ad-hoc argument parsing |
-| **Scripting support** | `wait` subcommand and per-operation timeouts make it suitable for automated flashing scripts | Limited scripting support |
-| **Installation** | `cargo install rkusb` — single static binary, no runtime dependencies beyond `libusb` | Must build from source; depends on system libraries |
+- List devices
+- Download a bootloader in Maskrom mode
+- Reset devices
+- Read, write, and erase raw LBAs
+- Wait for device enumeration
+- Query and switch storage media
+- Read GPT partitions and transfer partition contents
+- Parse Rockchip image files
+- Generate and write IDBlock data from a loader image
 
 ## Installation
 
@@ -101,3 +72,151 @@ rktools db --wait 30s rk3588_spl_loader_v1.19.113.bin
 rktools rst              # normal reboot
 rktools rst --subcode 1  # power off
 ```
+
+### Command summary
+
+| Command | Aliases | Description |
+|---|---|---|
+| `list` | `ls` | Enumerate connected Rockchip USB devices |
+| `download-boot` | `db` | Download a loader image to a device in Maskrom mode |
+| `info` | - | Detect and inspect Rockchip image files |
+| `reset` | `rst` | Reset or power off a connected device |
+| `lba` | - | Read, write, or erase raw sectors by LBA |
+| `wait` | - | Wait for a Rockchip device to appear |
+| `storage` | `st` | Query storage, switch media, print flash info, and access GPT partitions |
+| `upgrade-loader` | `ul` | Generate and write an IDBlock from a Rockchip loader image |
+
+### List connected devices
+
+```sh
+rktools ls
+```
+
+This prints each matching USB device with its bus, address, VID:PID, and detected mode.
+
+### Wait for a device
+
+```sh
+# wait forever until a supported device appears
+rktools wait
+
+# fail if nothing appears within 20 seconds
+rktools wait 20s
+```
+
+This is useful in flashing scripts where the device may re-enumerate between Maskrom and Loader mode.
+
+### Inspect Rockchip image files
+
+```sh
+# inspect a Rockchip loader image
+rktools info rk3588_spl_loader_v1.19.113.bin
+
+# inspect a Rockchip firmware bundle
+rktools info update.img
+```
+
+The command prints the file size and a parsed debug view of the detected Rockchip image header.
+
+### Raw LBA operations
+
+```sh
+# read 0x400 sectors starting at sector 0x2000
+rktools lba read 0x2000 0x400 boot.img
+
+# write a file to storage starting at sector 0x4000
+rktools lba write 0x4000 rootfs.img
+
+# erase 256 sectors starting at sector 0x8000
+rktools lba erase 0x8000 256
+```
+
+Notes:
+
+- `begin_sector` and `sector_count` accept decimal and `0x`-prefixed hexadecimal values.
+- `lba write` automatically pads the last partial sector with zeros.
+- `--timeout` applies to the full command, not each individual USB transfer.
+
+### Storage operations
+
+The `storage` command family works on the currently selected storage medium and supports device selection with `--bus`, `--addr`, and `--wait` just like `lba` and `upgrade-loader`.
+
+#### Query or switch current storage
+
+```sh
+# query current storage selection
+rktools storage select
+
+# switch to eMMC
+rktools storage select 1
+
+# switch to SPI NOR
+rktools storage select 9
+
+# switch to NVMe
+rktools storage select 11
+```
+
+Known storage codes:
+
+- `1` = eMMC
+- `2` = SD
+- `9` = SPI NOR
+- `11` = NVMe
+
+#### Read flash information
+
+```sh
+rktools storage info
+```
+
+This prints the parsed flash/storage information structure returned by the device.
+
+#### Print GPT partition table
+
+```sh
+rktools storage partition table
+```
+
+The command opens the currently selected storage as a 512-byte logical block device, reads the GPT, and prints the discovered partitions.
+
+#### Read a GPT partition to a file
+
+```sh
+# select by GPT partition name
+rktools storage partition read --name boot boot.img
+
+# select by partition index
+rktools storage partition read --index 4 rootfs.img
+
+# select by partition GUID
+rktools storage partition read --guid 01234567-89ab-cdef-0123-456789abcdef misc.img
+```
+
+#### Write a file to a GPT partition
+
+```sh
+# write by name
+rktools storage partition write --name boot boot.img
+
+# write by index
+rktools storage partition write --index 4 rootfs.img
+```
+
+Partition write behavior:
+
+- The target partition can be selected by exactly one of `--name`, `--guid`, or `--index`.
+- The input file must fit inside the selected partition.
+- The final partial sector is zero-padded automatically when needed.
+
+### Upgrade loader by writing an IDBlock
+
+```sh
+# write the generated IDBlock to the default LBA 64
+rktools upgrade-loader rk3588_spl_loader_v1.19.113.bin
+
+# wait for the device and override the destination LBA
+rktools upgrade-loader --wait 30s --lba 64 rk3588_spl_loader_v1.19.113.bin
+```
+
+`upgrade-loader` parses the Rockchip loader image, extracts `FlashBoot` and `FlashData`, and writes a generated IDBlock to storage. If the image also contains `FlashHead`, the tool will build the newer IDBlock format when the target device reports support for it.
