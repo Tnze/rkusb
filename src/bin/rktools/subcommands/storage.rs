@@ -23,6 +23,8 @@ enum Command {
     Get,
     #[command(about = "Set current storage selection", visible_alias("s"))]
     Set(SetArgs),
+    #[command(about = "Read flash info", visible_alias("i"))]
+    Info,
 }
 
 #[derive(clap::Args)]
@@ -54,15 +56,19 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), Box<dyn std::erro
                 storage_name(set_args.storage)
             );
         }
+        Command::Info => {
+            println!("{:#?}", rkdev.read_storage_info()?);
+        }
     }
 
     Ok(())
 }
 fn storage_name(code: u8) -> &'static str {
     match code {
-        1 => "emmc",
-        2 => "sd",
-        9 => "spinor",
-        _ => "unknown",
+        1 => "eMMC",
+        2 => "SD",
+        9 => "SPI NOR",
+        11 => "NVMe",
+        _ => "Unknown",
     }
 }

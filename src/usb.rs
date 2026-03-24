@@ -4,6 +4,9 @@ use zerocopy::FromBytes;
 const DIRECTION_OUT: u8 = 0x00;
 const DIRECTION_IN: u8 = 0x80;
 
+pub(crate) const CBW_SIGN: u32 = 0x43425355; /* "USBC" */
+pub(crate) const CSW_SIGN: u32 = 0x53425355; /* "USBS" */
+
 #[derive(FromBytes, Default)]
 #[repr(C, packed)]
 pub struct Cbwcb {
@@ -31,7 +34,7 @@ impl<T: FromBytes> Cbw<T> {
     /// Create a new CBW with defaults. Caller must set `cb` fields as required.
     pub fn new(cb: T) -> Self {
         Self {
-            signature: 0x43425355, // 'USBC'
+            signature: CBW_SIGN,
             tag: random::<u32>(),
             data_transfer_length: 0,
             flags: DIRECTION_OUT,

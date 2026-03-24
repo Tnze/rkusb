@@ -5,11 +5,15 @@ use std::{
 };
 
 use crc::{CRC_16_IBM_3740, Crc};
+use humansize::SizeFormatter;
 use log::{debug, info, trace};
 use thiserror::Error;
-use zerocopy::TryFromBytes;
+use zerocopy::{FromBytes, TryFromBytes};
 
-use crate::image::{RkBootEntryType, RkBootImage};
+use crate::{
+    image::{RkBootEntryType, RkBootImage},
+    usb::CSW_SIGN,
+};
 
 const USB_TIMEOUT: Duration = Duration::from_secs(5);
 const STORAGE_SECTOR_SIZE: usize = 512;
@@ -26,6 +30,83 @@ pub enum RkUsbError {
     CommandFailed(u8),
     #[error("Invalid CSW data")]
     InvalidCsw,
+    #[error("Invalid flash info length: {0}")]
+    InvalidFlashInfoLength(usize),
+}
+
+#[derive(FromBytes, Clone, Copy)]
+#[repr(C, packed)]
+pub struct RkFlashInfo {
+    /// Total flash size in 512-byte sectors.
+    pub flash_size: u32,
+    /// Block size in 512-byte sectors.
+    pub block_size: u16,
+    /// Page size in 512-byte units.
+    pub page_size: u8,
+    pub ecc_bits: u8,
+    pub access_time: u8,
+    pub manuf_code: u8,
+    pub flash_cs: u8,
+}
+
+impl std::fmt::Debug for RkFlashInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let flash_size_sectors = self.flash_size;
+        let block_size_sectors = self.block_size;
+        let page_size_sectors = self.page_size;
+        let flash_size = SizeFormatter::new(
+            (flash_size_sectors as u64).saturating_mul(STORAGE_SECTOR_SIZE as u64),
+            humansize::BINARY,
+        );
+        let block_size = SizeFormatter::new(
+            (block_size_sectors as u64).saturating_mul(STORAGE_SECTOR_SIZE as u64),
+            humansize::BINARY,
+        );
+        let page_size = SizeFormatter::new(
+            (page_size_sectors as u64).saturating_mul(STORAGE_SECTOR_SIZE as u64),
+            humansize::BINARY,
+        );
+        let ecc_bits = self.ecc_bits;
+        let access_time = self.access_time;
+        let manuf_code = self.manuf_code;
+        let flash_cs = self.flash_cs;
+
+        f.debug_struct("RkFlashInfo")
+            .field(
+                "manufacturer",
+                &format_args!("{}, value={:02X}", flash_manuf_name(manuf_code), manuf_code),
+            )
+            .field(
+                "flash_size",
+                &format_args!("{} ({} sectors)", flash_size, flash_size_sectors),
+            )
+            .field(
+                "block_size",
+                &format_args!("{} ({} sectors)", block_size, block_size_sectors),
+            )
+            .field(
+                "page_size",
+                &format_args!("{} ({} sectors)", page_size, page_size_sectors),
+            )
+            .field("ecc_bits", &ecc_bits)
+            .field("access_time", &access_time)
+            .field("flash_cs", &flash_cs)
+            .finish()
+    }
+}
+
+fn flash_manuf_name(code: u8) -> &'static str {
+    match code {
+        0 => "Samsung",
+        1 => "TOSHIBA",
+        2 => "HYNIX",
+        3 => "Infineon",
+        4 => "Micron",
+        5 => "Renesas",
+        6 => "ST",
+        7 => "Intel",
+        _ => "Unknown",
+    }
 }
 
 pub(crate) mod checksum;
@@ -164,7 +245,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         data_out: Option<&[u8]>,
         data_in: Option<&mut [u8]>,
         timeout: Duration,
-    ) -> Result<(), RkUsbError> {
+    ) -> Result<usize, RkUsbError> {
         let deadline = Instant::now() + timeout;
         let remaining = || {
             deadline
@@ -192,13 +273,17 @@ impl<T: rusb::UsbContext> RkDevice<T> {
             }
         }
 
-        if let Some(buf) = data_in {
+        let data_in_len = if let Some(buf) = data_in {
             trace!("Reading data stage bytes={}", buf.len());
             let n = self.device.read_bulk(self.bulk_in, buf, remaining()?)?;
-            if n != buf.len() {
+            let expected_min = cbw.data_transfer_length as usize;
+            if n < expected_min || n > buf.len() {
                 return Err(RkUsbError::Usb(rusb::Error::Io));
             }
-        }
+            n
+        } else {
+            0
+        };
 
         let mut csw_buf = [0u8; std::mem::size_of::<usb::Csw>()];
         let n = self
@@ -207,8 +292,10 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         if n != csw_buf.len() {
             return Err(RkUsbError::InvalidCsw);
         }
-
         let csw = usb::Csw::try_read_from_bytes(&csw_buf).map_err(|_| RkUsbError::InvalidCsw)?;
+        if csw.signature != CSW_SIGN {
+            return Err(RkUsbError::InvalidCsw);
+        }
         let csw_tag = csw.tag;
         if csw_tag != cbw_tag {
             return Err(RkUsbError::TagMismatch);
@@ -217,7 +304,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
             return Err(RkUsbError::CommandFailed(csw.status));
         }
         trace!("CSW validated tag={csw_tag:#010X}");
-        Ok(())
+        Ok(data_in_len)
     }
 
     /// Open a Rockchip USB device handle and locate bulk endpoints.
@@ -306,7 +393,8 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         info!("Resetting device with subcode={subcode:#04X}");
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0xff); // DEVICE_RESET
         cbw.cb.reserved = subcode;
-        self.cbw_transaction(&cbw, None, None, USB_TIMEOUT)
+        self.cbw_transaction(&cbw, None, None, USB_TIMEOUT)?;
+        Ok(())
     }
 
     /// Write a contiguous sector-aligned buffer to storage starting at the given LBA.
@@ -371,7 +459,8 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         cbw.cb.length = sector_count_u16.to_be();
         cbw.cb.reserved = subcode;
 
-        self.cbw_transaction(&cbw, None, Some(data), timeout)
+        self.cbw_transaction(&cbw, None, Some(data), timeout)?;
+        Ok(())
     }
 
     /// Erase a contiguous range of sectors from storage starting at the given LBA.
@@ -391,7 +480,8 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x25); // ERASE_LBA
         cbw.cb.address = pos.to_be();
         cbw.cb.length = sector_count.to_be();
-        self.cbw_transaction(&cbw, None, None, timeout)
+        self.cbw_transaction(&cbw, None, None, timeout)?;
+        Ok(())
     }
 
     /// Read device capability bytes.
@@ -402,6 +492,21 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         cbw.data_transfer_length = std::mem::size_of_val(&capability) as u32;
         self.cbw_transaction(&cbw, None, Some(&mut capability), timeout)?;
         Ok(capability)
+    }
+
+    /// Read storage information from device (opcode 0x1A), compatible with rkdeveloptool behavior.
+    pub fn read_storage_info(&mut self) -> Result<RkFlashInfo, RkUsbError> {
+        debug!("Reading flash info");
+        let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x1A); // READ_FLASH_INFO
+        cbw.data_transfer_length = std::mem::size_of::<RkFlashInfo>() as u32;
+
+        let mut info_buf = [0u8; 512];
+        let info_len = self.cbw_transaction(&cbw, None, Some(&mut info_buf), USB_TIMEOUT)?;
+        let info_buf = info_buf
+            .get(0..info_len)
+            .ok_or(RkUsbError::InvalidFlashInfoLength(info_len))?;
+        RkFlashInfo::try_read_from_bytes(info_buf)
+            .map_err(|_| RkUsbError::InvalidFlashInfoLength(info_len))
     }
 
     /// Read current storage selection from device.
@@ -425,7 +530,8 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         info!("Switching storage to code={storage}");
         let mut cbw = usb::Cbw::<usb::Cbwcb>::with_opcode(0x2A); // CHANGE_STORAGE
         cbw.cb.reserved = storage;
-        self.cbw_transaction(&cbw, None, None, USB_TIMEOUT)
+        self.cbw_transaction(&cbw, None, None, USB_TIMEOUT)?;
+        Ok(())
     }
 
     /// Change device storage using a typed storage selector.
