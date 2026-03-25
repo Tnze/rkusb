@@ -1,5 +1,5 @@
 use clap::Subcommand;
-use gpt::{disk::LogicalBlockSize::Lb512, partition::Partition};
+use gpt::{GptDisk, disk::LogicalBlockSize::Lb512, partition::Partition};
 use log::error;
 use memmap2::{Mmap, MmapOptions};
 use rkusb::RkDevice;
@@ -105,23 +105,23 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), Box<dyn std::erro
             println!("{:#?}", rkdev.read_storage_info()?);
         }
         Command::Partition(partition_args) => {
-            let gpt = gpt::GptConfig::new()
+            let mut disk = gpt::GptConfig::new()
                 .writable(false)
                 .logical_block_size(Lb512)
                 .open_from_device(RkBlockDevice::try_from(&mut rkdev)?)?;
-            let partitions = gpt.partitions();
+            let partitions = disk.partitions();
 
             match &partition_args.command {
                 PartitionCommand::Table => {
-                    println!("GPT partitions: {:#?}", partitions);
+                    println!("GPT partitions: {:#X?}", partitions);
                 }
                 PartitionCommand::Read(read_args) => {
-                    let (_, part) = select_partition(partitions, read_args)?;
-                    exec_partition_read(&mut rkdev, &part, &read_args.path)?;
+                    let part = select_partition(partitions, read_args)?.clone();
+                    exec_partition_read(&mut disk, part, &read_args.path)?;
                 }
                 PartitionCommand::Write(write_args) => {
-                    let (_, part) = select_partition(partitions, write_args)?;
-                    exec_partition_write(&mut rkdev, &part, &write_args.path)?;
+                    let part = select_partition(partitions, write_args)?.clone();
+                    exec_partition_write(&mut disk, part, &write_args.path)?;
                 }
             }
         }
@@ -142,14 +142,12 @@ enum SelectPartitionError {
     UnreachableSelectorState,
 }
 
-#[derive(Debug, Error, Clone, Copy)]
+#[derive(Debug, Error)]
 enum PartitionTransferError {
-    #[error("failed to get partition size")]
-    PartitionSize,
     #[error("file operation failed")]
-    FileIo,
+    FileIo(#[from] std::io::Error),
     #[error("memory map operation failed")]
-    MemoryMap,
+    MemoryMap(std::io::Error),
     #[error("size calculation overflow")]
     SizeOverflow,
     #[error("LBA calculation overflow")]
@@ -160,32 +158,32 @@ enum PartitionTransferError {
     InputSizeMismatch,
 }
 
-fn select_partition(
-    partitions: &std::collections::BTreeMap<u32, Partition>,
+fn select_partition<'a>(
+    partitions: &'a std::collections::BTreeMap<u32, Partition>,
     selector: &PartitionTransferArgs,
-) -> Result<(u32, Partition), SelectPartitionError> {
+) -> Result<&'a Partition, SelectPartitionError> {
     if let Some(name) = selector.name.as_deref() {
         return partitions
-            .into_iter()
+            .iter()
             .find(|(_, p)| p.name == name)
-            .map(|(id, p)| (*id, p.clone()))
+            .map(|(_, p)| p)
             .ok_or_else(|| SelectPartitionError::NameNotFound(name.to_owned()));
     }
 
     if let Some(guid) = selector.guid.as_deref() {
         let wanted = guid.to_ascii_lowercase();
         return partitions
-            .into_iter()
+            .iter()
             .find(|(_, p)| p.part_guid.to_string().to_ascii_lowercase() == wanted)
-            .map(|(id, p)| (*id, p.clone()))
+            .map(|(_, p)| p)
             .ok_or_else(|| SelectPartitionError::GuidNotFound(guid.to_owned()));
     }
 
     if let Some(index) = selector.index {
         return partitions
-            .into_iter()
+            .iter()
             .find(|(id, _)| **id == index)
-            .map(|(id, p)| (*id, p.clone()))
+            .map(|(_, p)| p)
             .ok_or(SelectPartitionError::IndexNotFound(index));
     }
 
@@ -193,26 +191,23 @@ fn select_partition(
 }
 
 fn exec_partition_read<T: rusb::UsbContext>(
-    rkdev: &mut RkDevice<T>,
-    part: &gpt::partition::Partition,
+    disk: &mut GptDisk<RkBlockDevice<T>>,
+    part: Partition,
     path: &str,
 ) -> Result<(), PartitionTransferError> {
     let output_len = part
         .bytes_len(Lb512)
-        .inspect_err(|e| error!("failed to get partition byte length for read: {e}"))
-        .map_err(|_| PartitionTransferError::PartitionSize)?;
+        .inspect_err(|e| error!("failed to get partition byte length for read: {e}"))?;
     let output = OpenOptions::new()
         .read(true)
         .create(true)
         .truncate(true)
         .write(true)
         .open(path)
-        .inspect_err(|e| error!("failed to open output file: {e}"))
-        .map_err(|_| PartitionTransferError::FileIo)?;
+        .inspect_err(|e| error!("failed to open output file: {e}"))?;
     output
         .set_len(output_len)
-        .inspect_err(|e| error!("failed to resize output file: {e}"))
-        .map_err(|_| PartitionTransferError::FileIo)?;
+        .inspect_err(|e| error!("failed to resize output file: {e}"))?;
 
     let output_len_usize = usize::try_from(output_len)
         .inspect_err(|e| error!("output length does not fit in usize: {e}"))
@@ -224,18 +219,12 @@ fn exec_partition_read<T: rusb::UsbContext>(
             .len(output_len_usize)
             .map_mut(&output)
             .inspect_err(|e| error!("failed to map output file: {e}"))
-            .map_err(|_| PartitionTransferError::MemoryMap)?
+            .map_err(PartitionTransferError::MemoryMap)?
     };
 
-    let chunk_bytes = RW_SECTORS_PER_CHUNK
-        .checked_mul(SECTOR_SIZE)
-        .and_then(|v| usize::try_from(v).ok())
-        .ok_or_else(|| {
-            error!("chunk byte length overflow: sectors_per_chunk={RW_SECTORS_PER_CHUNK}, sector_size={SECTOR_SIZE}");
-            PartitionTransferError::SizeOverflow
-        })?;
+    const CHUNK_BYTES: u64 = RW_SECTORS_PER_CHUNK * SECTOR_SIZE;
 
-    for (i, chunk) in output_map.chunks_mut(chunk_bytes).enumerate() {
+    for (i, chunk) in output_map.chunks_mut(CHUNK_BYTES as usize).enumerate() {
         let step = u64::try_from(i)
             .ok()
             .and_then(|v| v.checked_mul(RW_SECTORS_PER_CHUNK))
@@ -254,15 +243,14 @@ fn exec_partition_read<T: rusb::UsbContext>(
             .inspect_err(|e| error!("LBA is out of u32 range while reading partition: {e}"))
             .map_err(|_| PartitionTransferError::LbaOverflow)?;
 
-        rkdev
+        disk.device_mut()
             .read_lba(pos, chunk, DEFAULT_LBA_SUBCODE, DEFAULT_IO_TIMEOUT)
             .inspect_err(|e| error!("device read_lba failed: {e}"))
             .map_err(|_| PartitionTransferError::DeviceTransfer)?;
     }
     output_map
         .flush()
-        .inspect_err(|e| error!("failed to flush output map: {e}"))
-        .map_err(|_| PartitionTransferError::FileIo)?;
+        .inspect_err(|e| error!("failed to flush output map: {e}"))?;
 
     println!(
         "Read partition '{}' OK, {} bytes -> {}",
@@ -272,26 +260,23 @@ fn exec_partition_read<T: rusb::UsbContext>(
 }
 
 fn exec_partition_write<T: rusb::UsbContext>(
-    rkdev: &mut RkDevice<T>,
-    part: &gpt::partition::Partition,
+    disk: &mut GptDisk<RkBlockDevice<T>>,
+    part: Partition,
     path: &str,
 ) -> Result<(), PartitionTransferError> {
-    let input = File::open(path)
-        .inspect_err(|e| error!("failed to open input file: {e}"))
-        .map_err(|_| PartitionTransferError::FileIo)?;
+    let input = File::open(path).inspect_err(|e| error!("failed to open input file: {e}"))?;
     let input_map = unsafe {
         // SAFETY: input file is opened read-only and the mapping is read-only.
         Mmap::map(&input)
             .inspect_err(|e| error!("failed to map input file: {e}"))
-            .map_err(|_| PartitionTransferError::MemoryMap)?
+            .map_err(PartitionTransferError::MemoryMap)?
     };
     let input_len = u64::try_from(input_map.len())
         .inspect_err(|e| error!("input length does not fit in u64: {e}"))
         .map_err(|_| PartitionTransferError::SizeOverflow)?;
     let partition_bytes = part
         .bytes_len(Lb512)
-        .inspect_err(|e| error!("failed to get partition byte length for write: {e}"))
-        .map_err(|_| PartitionTransferError::PartitionSize)?;
+        .inspect_err(|e| error!("failed to get partition byte length for write: {e}"))?;
     if input_len != partition_bytes {
         error!(
             "input file size mismatch: input_len={} partition='{}' partition_bytes={}",
@@ -300,19 +285,9 @@ fn exec_partition_write<T: rusb::UsbContext>(
         return Err(PartitionTransferError::InputSizeMismatch);
     }
 
-    let chunk_bytes = RW_SECTORS_PER_CHUNK
-        .checked_mul(SECTOR_SIZE)
-        .and_then(|v| usize::try_from(v).ok())
-        .ok_or_else(|| {
-            error!("chunk byte length overflow: sectors_per_chunk={RW_SECTORS_PER_CHUNK}, sector_size={SECTOR_SIZE}");
-            PartitionTransferError::SizeOverflow
-        })?;
-    let sector_size_usize = usize::try_from(SECTOR_SIZE).map_err(|e| {
-        error!("sector size does not fit in usize: {e}");
-        PartitionTransferError::SizeOverflow
-    })?;
+    const CHUNK_BYTES: u64 = RW_SECTORS_PER_CHUNK * SECTOR_SIZE;
 
-    for (i, chunk) in input_map.chunks(chunk_bytes).enumerate() {
+    for (i, chunk) in input_map.chunks(CHUNK_BYTES as usize).enumerate() {
         let step = u64::try_from(i)
             .ok()
             .and_then(|v| v.checked_mul(RW_SECTORS_PER_CHUNK))
@@ -331,20 +306,14 @@ fn exec_partition_write<T: rusb::UsbContext>(
             .inspect_err(|e| error!("LBA is out of u32 range while writing partition: {e}"))
             .map_err(|_| PartitionTransferError::LbaOverflow)?;
 
-        let rem = chunk.len() % sector_size_usize;
-        if rem == 0 {
-            rkdev
-                .write_lba(pos, chunk, DEFAULT_LBA_SUBCODE, DEFAULT_IO_TIMEOUT)
-                .inspect_err(|e| error!("device write_lba failed: {e}"))
-                .map_err(|_| PartitionTransferError::DeviceTransfer)?;
-        } else {
-            let mut padded = vec![0u8; chunk.len() + sector_size_usize - rem];
-            padded[..chunk.len()].copy_from_slice(chunk);
-            rkdev
-                .write_lba(pos, &padded, DEFAULT_LBA_SUBCODE, DEFAULT_IO_TIMEOUT)
-                .inspect_err(|e| error!("device write_lba failed on padded chunk: {e}"))
-                .map_err(|_| PartitionTransferError::DeviceTransfer)?;
-        }
+        debug_assert!(
+            chunk.len().is_multiple_of(SECTOR_SIZE as usize),
+            "input chunk must be sector-aligned"
+        );
+        disk.device_mut()
+            .write_lba(pos, chunk, DEFAULT_LBA_SUBCODE, DEFAULT_IO_TIMEOUT)
+            .inspect_err(|e| error!("device write_lba failed: {e}"))
+            .map_err(|_| PartitionTransferError::DeviceTransfer)?;
     }
 
     println!(
