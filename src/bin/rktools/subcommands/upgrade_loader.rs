@@ -89,16 +89,14 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), UpgradeLoaderErro
         RkUsbError::Usb(rusb::Error::Timeout),
     );
 
-    let idblock_data = if let Some(loader_head) = loader_head {
+    if loader_head.is_some() {
         let capability = rkdev.read_capability(timeout()?)?;
         if (capability[1] & 1) == 0 {
             return Err(UpgradeLoaderError::FlashHeadNotSupported);
         }
-        idblock::build_new_idblock(loader_head, loader_data, loader_code, rc4_enabled)?
-    } else {
-        idblock::build_idblock(loader_data, loader_code, rc4_enabled)?
-    };
+    }
 
+    let idblock_data = idblock::build_idblock(loader_head, loader_data, loader_code, rc4_enabled)?;
     rkdev.write_lba(args.lba, &idblock_data, args.subcode, timeout()?)?;
     println!(
         "Upgrade loader OK, wrote {} sectors to LBA {}",

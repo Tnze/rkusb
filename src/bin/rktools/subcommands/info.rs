@@ -1,10 +1,18 @@
 use std::{
+    borrow::Cow,
     fs::File,
     io::{Read, Seek},
 };
 
 use memmap2::Mmap;
-use rkusb::image::{RKBOOT_TAG, RKFW_TAG, RKLDR_TAG, RkBootImage, RkFwImage};
+use rc4::{KeyInit, StreamCipher};
+use rkusb::{
+    idblock::{
+        RC4_KEY, Rc4Cipher,
+        new::{RKNS_TAG, RkNsImage},
+    },
+    image::{RKBOOT_TAG, RKFW_TAG, RKLDR_TAG, RkBootEntryType, RkBootImage, RkFwImage},
+};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -29,10 +37,15 @@ pub fn exec(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         RKLDR_TAG | RKBOOT_TAG => {
             let boot_img = RkBootImage::new(&mmap[..])?;
             println!("{boot_img:#?}");
+            dump_flash_head_idblock(&boot_img);
         }
         RKFW_TAG => {
             let fw_img = RkFwImage::new(&mmap[..])?;
             println!("{fw_img:#?}");
+        }
+        RKNS_TAG => {
+            let rkns_header = RkNsImage::new(&mmap[..])?;
+            println!("{rkns_header:#?}");
         }
         x => println!("Unknown tag: {x:#06X}"),
     }
@@ -40,4 +53,20 @@ pub fn exec(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     // drop(mmap);
     // file.unlock()?;
     Ok(())
+}
+
+fn dump_flash_head_idblock(boot_img: &RkBootImage<'_>) {
+    let Some((_, flash_head, _)) = boot_img
+        .iter_entries(RkBootEntryType::EntryLoader)
+        .find(|entry| entry.0 == "FlashHead")
+    else {
+        return;
+    };
+
+    let mut flash_head = Cow::Borrowed(flash_head);
+    if unsafe { (*boot_img.boot_header_ptr()).rc4_flag } != 0 {
+        Rc4Cipher::new((&RC4_KEY).into()).apply_keystream(flash_head.to_mut());
+    }
+
+    println!("FlashHead IDBlock: {:#X?}", RkNsImage::new(&flash_head));
 }
