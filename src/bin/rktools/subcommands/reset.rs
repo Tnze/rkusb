@@ -10,9 +10,8 @@ pub struct Args {
     #[arg(long, help = "Address of the device")]
     addr: Option<u8>,
     #[arg(
-        short,
-        long,
         default_value_t = 0,
+        value_name = "SUBCODE",
         help = "Reset subcode (0 for normal reset, 1 for power off)"
     )]
     subcode: u8,
