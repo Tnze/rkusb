@@ -42,6 +42,8 @@ enum Commands {
         visible_alias("ul")
     )]
     UpgradeLoader(subcommands::upgrade_loader::Args),
+    #[command(about = "Upgrade device by using update.img")]
+    Upgrade(subcommands::upgrade::Args),
 }
 
 fn main() {
@@ -66,6 +68,7 @@ fn handle_command(cmd: &Commands) -> Result<(), Box<dyn std::error::Error>> {
         Commands::UpgradeLoader(args) => {
             subcommands::upgrade_loader::exec(rusb::Context::new()?, args)?
         }
+        Commands::Upgrade(args) => subcommands::upgrade::exec(rusb::Context::new()?, args)?,
     }
     Ok(())
 }

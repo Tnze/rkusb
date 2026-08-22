@@ -4,5 +4,6 @@ pub mod lba;
 pub mod list;
 pub mod reset;
 pub mod storage;
+pub mod upgrade;
 pub mod upgrade_loader;
 pub mod wait;
