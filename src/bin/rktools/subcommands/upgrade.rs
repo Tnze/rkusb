@@ -1,5 +1,11 @@
-use std::{fs::File, io::Cursor, time::Duration};
+use std::{
+    ffi::FromBytesUntilNulError,
+    fs::File,
+    io::{Cursor, Read, Seek, SeekFrom, Write},
+    time::Duration,
+};
 
+use gpt::{GptDisk, GptError, disk::LogicalBlockSize, partition::Partition};
 use memmap2::Mmap;
 use rkafp::rkaf::Image;
 use rkusb::{
@@ -7,8 +13,12 @@ use rkusb::{
     image::{ImageError, RkFwImage},
 };
 use thiserror::Error;
+use zerocopy::FromBytes;
 
-use crate::common::{self, DeviceSelectionError};
+use crate::{
+    common::{self, DeviceSelectionError},
+    storage::RkBlockDevice,
+};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -35,6 +45,8 @@ pub enum UpgradeError {
     DeviceSelection(#[from] DeviceSelectionError),
     #[error("RkUsb error: {0}")]
     RkUsb(#[from] RkUsbError),
+    #[error("GptError: {0}")]
+    GptError(#[from] GptError),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Image parse error: {0}")]
@@ -43,6 +55,12 @@ pub enum UpgradeError {
     UnknownRkUsbType,
     #[error("parameter not found")]
     ParameterNotFound,
+    #[error("partition not found")]
+    PartitionNotFound,
+    #[error("Invalid partition name: {0}")]
+    InvalidPartitionName(FromBytesUntilNulError),
+    #[error("Failed to write sparse image: {0}")]
+    WriteSparseImageError(#[from] WriteSparseImageError),
 }
 
 pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), UpgradeError> {
@@ -64,6 +82,7 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), UpgradeError> {
 
     if device_type == RkUsbType::Maskrom {
         // TODO: Read capability to determine whether need download boot?
+        println!("Download boot");
         rkdev.download_boot(boot)?;
 
         // TODO: Device might reset? re-enumerate it!
@@ -75,10 +94,135 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), UpgradeError> {
         .ok_or(UpgradeError::ParameterNotFound)?;
 
     // Check partition table
+    println!("Check partition table");
+    let lb_size = match rkdev.read_storage_info()?.lba_size() {
+        1 => LogicalBlockSize::Lb512,
+        8 => LogicalBlockSize::Lb4096,
+        x => {
+            eprintln!("Unsupported LBA size: {x}");
+            return Ok(());
+        }
+    };
+    let mut disk = gpt::GptConfig::new()
+        .writable(true)
+        .logical_block_size(lb_size)
+        .open_from_device(RkBlockDevice::try_from(&mut rkdev)?)?;
+    // TODO: Check it here
 
-    // Write regular images
+    // Write partitions
+    disk = gpt::GptConfig::new()
+        .writable(false)
+        .logical_block_size(lb_size)
+        .open_from_device(disk.take_device())?;
+    let partitions = disk.partitions().clone();
 
-    // Write super image
+    for i in 0..fw.len()? {
+        let mut entry = fw.by_index(i)?.expect("entry must exist");
+        let name = entry
+            .metadata()
+            .name()
+            .map_err(UpgradeError::InvalidPartitionName)?
+            .to_string_lossy();
+        println!("Writing file {name:?}");
+
+        match &*name {
+            "package-file" | "parameter" => { /* Skip */ }
+            x => {
+                let part = partitions
+                    .iter()
+                    .find(|(_, p)| p.name == x)
+                    .map(|(_, p)| p)
+                    .ok_or(UpgradeError::PartitionNotFound)?;
+                if x == "super" {
+                    write_sparse_image(&mut disk, part, &mut entry.reader()?)?;
+                } else {
+                    write_regular_image(&mut disk, part, entry.reader()?)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn write_regular_image<T>(
+    disk: &mut GptDisk<T>,
+    part: &Partition,
+    img: impl Read,
+) -> Result<(), UpgradeError> {
+    todo!()
+}
+
+#[derive(Error, Debug)]
+pub enum WriteSparseImageError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Invalid magic")]
+    InvalidMagic,
+    #[error("Unsupported format version")]
+    UnsupportedVersion,
+    #[error("Unknown sparse chunk type")]
+    UnknownSparseChunkType,
+    #[error("Image too large: part_size={part_size}, total_size={total_size}")]
+    ImageTooLarge { part_size: u64, total_size: u64 },
+}
+
+fn write_sparse_image<R: Read + Seek>(
+    disk: &mut GptDisk<RkBlockDevice<rusb::Context>>,
+    part: &Partition,
+    img: &mut R,
+) -> Result<(), WriteSparseImageError> {
+    let sparse_header = sparse::SparseHeader::read_from_io(&mut *img)?;
+
+    // Check magic
+    if sparse_header.magic.get() != sparse::SPARSE_HEADER_MAGIC {
+        return Err(WriteSparseImageError::InvalidMagic);
+    }
+
+    // Check version
+    if sparse_header.major_version.get() > 1 || sparse_header.minor_version.get() > 0 {
+        return Err(WriteSparseImageError::UnsupportedVersion);
+    }
+
+    // Check size
+    let block_size = sparse_header.blk_sz.get() as u64;
+    let total_size = block_size * sparse_header.total_blks.get() as u64;
+    let part_size = part.bytes_len(*disk.logical_block_size())?;
+    if total_size > part_size {
+        return Err(WriteSparseImageError::ImageTooLarge {
+            part_size,
+            total_size,
+        });
+    }
+
+    let chunk_header_size = sparse_header.chunk_hdr_sz.get() as u64;
+
+    let mut pos = sparse_header.file_hdr_sz.get() as u64;
+    let device = disk.device_mut();
+    device.seek(SeekFrom::Start(0))?;
+    for _ in 0..sparse_header.total_chunks.get() {
+        let chunk_start = img.seek(SeekFrom::Start(pos))?;
+        let chunk_header = sparse::ChunkHeader::read_from_io(&mut *img)?;
+
+        let data_size = block_size * chunk_header.chunk_sz.get() as u64;
+
+        img.seek(SeekFrom::Start(chunk_start + chunk_header_size))?;
+        match chunk_header.chunk_type.get() {
+            sparse::CHUNK_TYPE_RAW => {
+                std::io::copy(&mut img.take(data_size), device)?;
+            }
+            sparse::CHUNK_TYPE_FILL => {
+                todo!()
+            }
+            sparse::CHUNK_TYPE_DONT_CARE => {
+                todo!()
+            }
+            sparse::CHUNK_TYPE_CRC32 => { /* TODO */ }
+            _ => return Err(WriteSparseImageError::UnknownSparseChunkType),
+        }
+
+        pos += chunk_header.total_sz.get() as u64;
+    }
 
     Ok(())
 }
@@ -86,80 +230,33 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), UpgradeError> {
 mod sparse {
     use zerocopy::{FromBytes, Immutable, KnownLayout, LE, U16, U32};
 
-    const SPARSE_HEADER_MAGIC: u32 = 0xed26ff3a;
+    pub const SPARSE_HEADER_MAGIC: u32 = 0xed26ff3a;
 
-    const CHUNK_TYPE_RAW: u16 = 0xCAC1;
-    const CHUNK_TYPE_FILL: u16 = 0xCAC2;
-    const CHUNK_TYPE_DONT_CARE: u16 = 0xCAC3;
-    const CHUNK_TYPE_CRC32: u16 = 0xCAC4;
+    pub const CHUNK_TYPE_RAW: u16 = 0xCAC1;
+    pub const CHUNK_TYPE_FILL: u16 = 0xCAC2;
+    pub const CHUNK_TYPE_DONT_CARE: u16 = 0xCAC3;
+    pub const CHUNK_TYPE_CRC32: u16 = 0xCAC4;
 
+    #[derive(FromBytes, Immutable, KnownLayout)]
     #[repr(C)]
-    struct SparseHeader {
-        magic: U32<LE>,
-        major_version: U16<LE>,
-        minor_version: U16<LE>,
-        file_hdr_sz: U16<LE>,
-        chunk_hdr_sz: U16<LE>,
-        blk_sz: U32<LE>,
-        total_blks: U32<LE>,
-        total_chunks: U32<LE>,
-        image_checksum: U32<LE>,
+    pub struct SparseHeader {
+        pub magic: U32<LE>,
+        pub major_version: U16<LE>,
+        pub minor_version: U16<LE>,
+        pub file_hdr_sz: U16<LE>,
+        pub chunk_hdr_sz: U16<LE>,
+        pub blk_sz: U32<LE>,
+        pub total_blks: U32<LE>,
+        pub total_chunks: U32<LE>,
+        pub image_checksum: U32<LE>,
     }
 
     #[derive(FromBytes, Immutable, KnownLayout)]
     #[repr(C)]
-    struct ChunkHeader {
-        chunk_type: U16<LE>,
-        _reserved1: U16<LE>,
-        chunk_sz: U32<LE>,
-        total_sz: U32<LE>,
-    }
-
-    pub enum Chunk<'data> {
-        Raw(&'data [u8]),
-        Fill(&'data [u8; 4]),
-        Skip,
-        CRC32(&'data [u8; 4]),
-    }
-
-    pub struct Chunks<'data> {
-        sparse_image: &'data [u8],
-        position: usize,
-    }
-
-    impl<'data> Chunks<'data> {
-        pub fn new(sparse_image: &'data [u8]) -> Self {
-            let position = todo!("check sparse_header");
-            Self {
-                sparse_image,
-                position,
-            }
-        }
-    }
-
-    impl<'data> Iterator for Chunks<'data> {
-        type Item = (u32, Chunk<'data>);
-
-        fn next(&mut self) -> Option<Self::Item> {
-            let data = &self.sparse_image[self.position..];
-            let header = ChunkHeader::ref_from_bytes(data).ok()?;
-
-            let chunk = match header.chunk_type.get() {
-                CHUNK_TYPE_RAW => {
-                    Chunk::Raw(&data[size_of::<ChunkHeader>()..header.total_sz.get() as usize])
-                }
-                CHUNK_TYPE_FILL => Chunk::Fill(
-                    data[size_of::<ChunkHeader>()..header.total_sz.get() as usize].as_array()?,
-                ),
-                CHUNK_TYPE_DONT_CARE => Chunk::Skip,
-                CHUNK_TYPE_CRC32 => Chunk::CRC32(
-                    data[size_of::<ChunkHeader>()..header.total_sz.get() as usize].as_array()?,
-                ),
-                _ => return None,
-            };
-
-            self.position += header.total_sz.get() as usize;
-            Some((header.chunk_sz.get(), chunk))
-        }
+    pub struct ChunkHeader {
+        pub chunk_type: U16<LE>,
+        pub _reserved1: U16<LE>,
+        pub chunk_sz: U32<LE>,
+        pub total_sz: U32<LE>,
     }
 }
