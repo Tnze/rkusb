@@ -1,7 +1,7 @@
 use std::{
     ffi::FromBytesUntilNulError,
     fs::File,
-    io::{Cursor, Read, Seek, SeekFrom, Write},
+    io::{Cursor, Read, Seek, SeekFrom},
     time::Duration,
 };
 
@@ -61,6 +61,10 @@ pub enum UpgradeError {
     InvalidPartitionName(FromBytesUntilNulError),
     #[error("Failed to write sparse image: {0}")]
     WriteSparseImageError(#[from] WriteSparseImageError),
+    #[error("Parameter too large: {0}")]
+    ParameterTooLarge(u64),
+    #[error("Parameter too short: {0}")]
+    ParameterTooShort(u64),
 }
 
 pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), UpgradeError> {
@@ -86,12 +90,33 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), UpgradeError> {
         rkdev.download_boot(boot)?;
 
         // TODO: Device might reset? re-enumerate it!
+        let selected_device = common::find_device(&usb_ctx, Some(bus), Some(addr), args.wait)?;
+        rkdev = RkDevice::open(&selected_device)?;
     }
 
     let mut fw = Cursor::new(rkfw.fw_data()?);
-    let param = fw
-        .by_name(c"parameter")?
-        .ok_or(UpgradeError::ParameterNotFound)?;
+    let param = {
+        let mut param = fw
+            .by_name(c"parameter")?
+            .ok_or(UpgradeError::ParameterNotFound)?;
+
+        let param_size = param.metadata().size();
+        if param_size > 64 * 1024 {
+            return Err(UpgradeError::ParameterTooLarge(param_size));
+        }
+        if param_size <= 2 {
+            return Err(UpgradeError::ParameterTooShort(param_size));
+        }
+
+        let mut param_content = Vec::with_capacity(param_size as usize);
+        param.reader()?.read_to_end(&mut param_content)?;
+
+        let (data, crc32) = param_content.split_last_chunk::<2>().unwrap();
+        // TODO: Check CRC32
+
+        param_content.truncate(param_content.len() - 2);
+        param_content
+    };
 
     // Check partition table
     println!("Check partition table");
@@ -134,9 +159,11 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), UpgradeError> {
                     .map(|(_, p)| p)
                     .ok_or(UpgradeError::PartitionNotFound)?;
                 if x == "super" {
-                    write_sparse_image(&mut disk, part, &mut entry.reader()?)?;
+                    let mut reader = entry.reader()?;
+                    write_sparse_image(&mut disk, part, &mut reader)?;
                 } else {
-                    write_regular_image(&mut disk, part, entry.reader()?)?;
+                    let mut reader = entry.reader()?;
+                    write_regular_image(&mut disk, part, &mut reader)?;
                 }
             }
         }
@@ -145,12 +172,20 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), UpgradeError> {
     Ok(())
 }
 
-fn write_regular_image<T>(
-    disk: &mut GptDisk<T>,
+fn write_regular_image<R: Read + Seek>(
+    disk: &mut GptDisk<RkBlockDevice<rusb::Context>>,
     part: &Partition,
-    img: impl Read,
+    img: &mut R,
 ) -> Result<(), UpgradeError> {
-    todo!()
+    let lb_size = *disk.logical_block_size();
+    let part_size = part.bytes_len(lb_size)?;
+    let part_start = part.bytes_start(lb_size)?;
+
+    let device = disk.device_mut();
+    device.seek(SeekFrom::Start(part_start))?;
+
+    std::io::copy(&mut img.take(part_size), device)?;
+    Ok(())
 }
 
 #[derive(Error, Debug)]
@@ -172,10 +207,14 @@ fn write_sparse_image<R: Read + Seek>(
     part: &Partition,
     img: &mut R,
 ) -> Result<(), WriteSparseImageError> {
-    let sparse_header = sparse::SparseHeader::read_from_io(&mut *img)?;
+    use sparse::{
+        CHUNK_TYPE_CRC32, CHUNK_TYPE_DONT_CARE, CHUNK_TYPE_FILL, CHUNK_TYPE_RAW, ChunkHeader,
+        SPARSE_HEADER_MAGIC, SparseHeader, filling_chunk,
+    };
+    let sparse_header = SparseHeader::read_from_io(&mut *img)?;
 
     // Check magic
-    if sparse_header.magic.get() != sparse::SPARSE_HEADER_MAGIC {
+    if sparse_header.magic.get() != SPARSE_HEADER_MAGIC {
         return Err(WriteSparseImageError::InvalidMagic);
     }
 
@@ -187,7 +226,9 @@ fn write_sparse_image<R: Read + Seek>(
     // Check size
     let block_size = sparse_header.blk_sz.get() as u64;
     let total_size = block_size * sparse_header.total_blks.get() as u64;
-    let part_size = part.bytes_len(*disk.logical_block_size())?;
+    let lb_size = *disk.logical_block_size();
+    let part_size = part.bytes_len(lb_size)?;
+    let part_start = part.bytes_start(lb_size)?;
     if total_size > part_size {
         return Err(WriteSparseImageError::ImageTooLarge {
             part_size,
@@ -196,28 +237,31 @@ fn write_sparse_image<R: Read + Seek>(
     }
 
     let chunk_header_size = sparse_header.chunk_hdr_sz.get() as u64;
-
     let mut pos = sparse_header.file_hdr_sz.get() as u64;
+
     let device = disk.device_mut();
-    device.seek(SeekFrom::Start(0))?;
+    device.seek(SeekFrom::Start(part_start))?;
+
     for _ in 0..sparse_header.total_chunks.get() {
         let chunk_start = img.seek(SeekFrom::Start(pos))?;
-        let chunk_header = sparse::ChunkHeader::read_from_io(&mut *img)?;
+        let chunk_header = ChunkHeader::read_from_io(&mut *img)?;
 
         let data_size = block_size * chunk_header.chunk_sz.get() as u64;
 
         img.seek(SeekFrom::Start(chunk_start + chunk_header_size))?;
         match chunk_header.chunk_type.get() {
-            sparse::CHUNK_TYPE_RAW => {
+            CHUNK_TYPE_RAW => {
                 std::io::copy(&mut img.take(data_size), device)?;
             }
-            sparse::CHUNK_TYPE_FILL => {
-                todo!()
+            CHUNK_TYPE_FILL => {
+                let mut buf = [0u8; 4];
+                img.read_exact(&mut buf)?;
+                std::io::copy(&mut filling_chunk(&buf, data_size), device)?;
             }
-            sparse::CHUNK_TYPE_DONT_CARE => {
-                todo!()
+            CHUNK_TYPE_DONT_CARE => {
+                device.seek(SeekFrom::Current(data_size as i64))?;
             }
-            sparse::CHUNK_TYPE_CRC32 => { /* TODO */ }
+            CHUNK_TYPE_CRC32 => { /* TODO */ }
             _ => return Err(WriteSparseImageError::UnknownSparseChunkType),
         }
 
@@ -228,6 +272,8 @@ fn write_sparse_image<R: Read + Seek>(
 }
 
 mod sparse {
+    use std::io::Read;
+
     use zerocopy::{FromBytes, Immutable, KnownLayout, LE, U16, U32};
 
     pub const SPARSE_HEADER_MAGIC: u32 = 0xed26ff3a;
@@ -258,5 +304,22 @@ mod sparse {
         pub _reserved1: U16<LE>,
         pub chunk_sz: U32<LE>,
         pub total_sz: U32<LE>,
+    }
+
+    struct Repeat<'a>(&'a [u8]);
+
+    impl<'a> std::io::Read for Repeat<'a> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let len = buf.len();
+            let mut chunks = buf.chunks_exact_mut(self.0.len());
+            for chunk in &mut chunks {
+                chunk.copy_from_slice(self.0);
+            }
+            Ok(len - chunks.into_remainder().len())
+        }
+    }
+
+    pub fn filling_chunk(data: &[u8], len: u64) -> impl std::io::Read {
+        Repeat(data).take(len)
     }
 }
