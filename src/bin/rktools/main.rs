@@ -1,6 +1,7 @@
 use clap::{ArgAction, Parser, Subcommand};
 
 mod common;
+mod nolimit;
 mod progress;
 mod storage;
 mod subcommands;
@@ -54,13 +55,26 @@ enum Commands {
     Otp(subcommands::otp::Args),
     #[command(about = "Upgrade device by using update.img")]
     Upgrade(subcommands::upgrade::Args),
+    #[command(
+        about = "Batch-backup partitions per GPT (detects the 32 MiB 0xCC read wall)"
+    )]
+    Dump(subcommands::dump::Args),
+    #[command(
+        about = "Remove the rockusb 32 MiB read limit from a flash dump",
+        visible_alias("nl")
+    )]
+    Nolimit {
+        #[command(subcommand)]
+        cmd: nolimit::NolimitCommands,
+    },
 }
 
 fn main() {
     let cli = Cli::parse();
     init_logger(cli.verbose);
     if let Err(err) = handle_command(&cli.command) {
-        eprintln!("{err}");
+        eprintln!("error: {err}");
+        std::process::exit(1);
     }
 }
 
@@ -82,6 +96,8 @@ fn handle_command(cmd: &Commands) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Vendor(args) => subcommands::vendor::exec(rusb::Context::new()?, args)?,
         Commands::Otp(args) => subcommands::otp::exec(rusb::Context::new()?, args)?,
         Commands::Upgrade(args) => subcommands::upgrade::exec(rusb::Context::new()?, args)?,
+        Commands::Dump(args) => subcommands::dump::exec(rusb::Context::new()?, args)?,
+        Commands::Nolimit { cmd } => nolimit::exec(cmd)?,
     }
     Ok(())
 }

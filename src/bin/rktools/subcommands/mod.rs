@@ -1,4 +1,5 @@
 pub mod download_boot;
+pub mod dump;
 pub mod info;
 pub mod lba;
 pub mod list;

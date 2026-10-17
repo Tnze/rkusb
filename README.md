@@ -90,6 +90,50 @@ rktools rst --subcode 1  # power off
 | `upgrade-loader` | `ul` | Generate and write an IDBlock from a Rockchip loader image |
 | `sn` | `serial` | Read or write the device serial number |
 | `otp` | - | Dump chip OTP / eFuse |
+| `vendor` | `vs` | Read/write vendor storage (SN, MAC, IMEI) like RKDevInfoWriteTool |
+| `upgrade` | - | Upgrade a device by flashing an `update.img` |
+| `dump` | - | Batch-backup partitions per GPT (detects the 32 MiB 0xCC read wall) |
+| `nolimit` | `nl` | Remove the rockusb 32 MiB read limit from a flash dump |
+
+### Batch-backup partitions (dump)
+
+```sh
+# back up every partition (except userdata/cache/misc/metadata) into ./dump
+rktools dump
+
+# only specific partitions
+rktools dump --partitions uboot_a,uboot_b,misc
+
+# resume an interrupted backup; stop at the 32 MiB 0xCC wall (default)
+rktools dump --resume
+```
+
+A device whose U-Boot still enforces the rockusb read limit fills every
+sector past 32 MiB with `0xCC` and reports the read as successful. `dump`
+detects that fill, truncates the affected partition file, and reports the
+wall instead of silently producing garbage. Patch the U-Boot in a dump with
+`rktools nl fix` (below), flash it back, and re-run the backup.
+
+### Remove the 32 MiB rockusb read limit (nolimit)
+
+```sh
+# identify a dump, change nothing
+rktools nl classify dump.bin
+
+# patch every U-Boot FIT copy: guard -> b blk_dread, hash+digest refreshed
+# (rktools nl fix = classify + trim + patch + verify)
+rktools nl fix dump.bin --outdir out
+
+# re-check a patched dump
+rktools nl verify out/dump_nolimit.bin
+
+# just locate the guard in a U-Boot payload
+rktools nl limit uboot-payload.bin --base 0x00200000
+```
+
+Exit code is 0 only if every input was patched AND verified. The verified
+image can be flashed back to `uboot_a`/`uboot_b` (see `storage partition`)
+to lift the read limit on the device itself.
 
 ### List connected devices
 
