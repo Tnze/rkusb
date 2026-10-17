@@ -1,12 +1,13 @@
 use std::{
     fmt::{Debug, Formatter},
+    io::Cursor,
     time::Duration,
 };
 
 use thiserror::Error;
-use zerocopy::{FromBytes, Immutable, KnownLayout, byteorder::little_endian::*};
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, byteorder::little_endian::*};
 
-use rkafp::rkaf::RK_CRC;
+use rkafp::rkaf::{Image, RK_CRC};
 pub use rkafp::rkfw::{ImageHeader as RkFwHeader, MAGIC as RKFW_TAG, RkTime};
 
 type Uchar = u8;
@@ -242,10 +243,7 @@ impl<'data> RkFwImage<'data> {
         }
         let (fw_offset, fw_end) = unsafe {
             let fw_size = (*header).fw_size.get() as usize;
-            let mut fw_offset = (*header).fw_offset.get() as usize;
-            if &(*header).reserved_2 == b"HI" {
-                fw_offset |= ((*header).fw_offset_hi.get() as usize) << 32;
-            }
+            let fw_offset = (*header).fw_offset() as usize;
             let fw_end = fw_offset
                 .checked_add(fw_size)
                 .ok_or(ImageError::FwOutOfRange)?;
@@ -285,6 +283,10 @@ impl<'data> RkFwImage<'data> {
                 .and_then(RkBootImage::new)
         }
     }
+
+    pub fn fw_data(&self) -> Result<&'data [u8], ImageError> {
+        Ok(self.fw)
+    }
 }
 
 impl Debug for RkBootImage<'_> {
@@ -317,12 +319,12 @@ impl Debug for RkBootImage<'_> {
 impl Debug for RkFwImage<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let header = unsafe { std::ptr::read_unaligned(self.header_ptr()) };
-        f.debug_struct("RkFwImage")
-            .field("header", &header)
-            .field("fw_len", &self.fw.len())
-            .field("md5", &String::from_utf8_lossy(self.md5))
-            .field("sign_len", &self.sign.map(hex::encode))
-            .field("boot", &self.boot_data())
-            .finish()
+        let mut ds = f.debug_struct("RkFwImage");
+        ds.field("header", &header);
+        ds.field("fw_len", &self.fw.len());
+        ds.field("md5", &String::from_utf8_lossy(self.md5));
+        ds.field("sign_len", &self.sign.map(hex::encode));
+        ds.field("boot", &self.boot_data());
+        ds.finish()
     }
 }

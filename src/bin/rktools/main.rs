@@ -52,6 +52,8 @@ enum Commands {
     Vendor(subcommands::vendor::Args),
     #[command(about = "Dump chip OTP / eFuse (xrock otp)")]
     Otp(subcommands::otp::Args),
+    #[command(about = "Upgrade device by using update.img")]
+    Upgrade(subcommands::upgrade::Args),
 }
 
 fn main() {
@@ -79,6 +81,7 @@ fn handle_command(cmd: &Commands) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Sn(args) => subcommands::sn::exec(rusb::Context::new()?, args)?,
         Commands::Vendor(args) => subcommands::vendor::exec(rusb::Context::new()?, args)?,
         Commands::Otp(args) => subcommands::otp::exec(rusb::Context::new()?, args)?,
+        Commands::Upgrade(args) => subcommands::upgrade::exec(rusb::Context::new()?, args)?,
     }
     Ok(())
 }
