@@ -90,7 +90,8 @@ impl<T: rusb::UsbContext> Read for RkBlockDevice<'_, T> {
             return Ok(0);
         }
         let max_len = usize::try_from(self.disk_size_bytes - self.pos).unwrap_or(usize::MAX);
-        let buf = &mut buf[..buf.len().min(max_len)];
+        let max_len = max_len.min(buf.len());
+        let buf = &mut buf[..max_len];
         let read_len = buf.len();
         let end_pos = self
             .pos
