@@ -191,7 +191,24 @@ pub fn exec(cmd: &NolimitCommands) -> Result<(), Box<dyn std::error::Error>> {
                 return Err("verification FAILED".into());
             }
             println!("  {} checks passed", r.checks);
-            Ok(())
+            // SPL -> U-Boot hand-off emulation (rockchip_splsim, GPL-3.0-or-later)
+            println!("\n  --- SPL hand-off emulation ---");
+            match crate::splsim::verify_dump(&p, &Default::default()) {
+                Ok(v) if v.is_success() => {
+                    println!("  SPL printed 'Jumping to U-Boot' - image is bootable");
+                    Ok(())
+                }
+                Ok(crate::splsim::Verdict::AnchorsNotFound) => {
+                    println!("  SPL anchors not found (unsupported SPL build) - skipped");
+                    Ok(())
+                }
+                Ok(v) => Err(format!("hand-off emulation failed: {v:?}").into()),
+                Err(e) if e.contains("no U-Boot FIT") => {
+                    println!("  not a full dump (no FIT) - simulation skipped");
+                    Ok(())
+                }
+                Err(e) => Err(format!("hand-off emulation error: {e}").into()),
+            }
         }
         NolimitCommands::Fix { dumps, indir, outdir, only_primary, no_verify, dry_run } => {
             let files: Vec<PathBuf> = if !dumps.is_empty() {

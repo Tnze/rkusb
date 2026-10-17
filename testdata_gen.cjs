@@ -14,7 +14,7 @@ W.forEach((w, i) => payload.writeUInt32LE(w, base_off + i * 4));
 payload.writeUInt32LE(0x9100A000, base_off + 56); // guard+0x28 -> blk_dread
 
 // ---- FDT ----
-const names = ["images","uboot","data-position","data-size","compression","load","hash","algo","value","description","type","arch","os"];
+const names = ["images","uboot","data-position","data-size","compression","load","hash","algo","value","description","type","arch","os","configurations","default","firmware","loadables","sign-images"];
 const strings = Buffer.concat(names.map(n => Buffer.from(n + "\0")));
 const sOff = (name) => strings.indexOf(Buffer.from(name + "\0"));
 function tokProp(name, val) {
@@ -36,6 +36,12 @@ let s = Buffer.concat([
   tokProp("load", Buffer.alloc(4)),
   tokProp("data-position", Buffer.alloc(4)),
   tokProp("data-size", Buffer.alloc(4)),
+  tokBeg("configurations"),
+  tokBeg("default"),
+  tokProp("firmware", Buffer.from("uboot")),
+  tokProp("loadables", Buffer.from("uboot")),
+  be32(2),
+  be32(2),
   tokBeg("hash"),
   tokProp("algo", Buffer.from("sha256")),
   tokProp("value", Buffer.alloc(32)),
@@ -115,6 +121,61 @@ Buffer.from(hdrGpt).copy(img, 1 * SECTOR);
 entries.copy(img, 2 * SECTOR);
 fit.copy(img, 128 * SECTOR);
 fit.copy(img, 384 * SECTOR);
+
+
+// ---- RKNS idblock with a minimal synthetic SPL ----
+// RKNS magic at 0x8000 (per nolimit classify: T20Pro/RK3576 offset)
+const RKNS_OFF = 0x8000;
+Buffer.from("RKNS").copy(img, RKNS_OFF);
+// loader-entry table: 16-byte records: u16 sect_off | u16 nsect | u32 0xffffffff | u32 index
+// place SPL at idblock+1 sector; idblock base = RKNS_OFF
+const SPL_OFF = RKNS_OFF + 0x200; // 512 bytes after RKNS magic
+const SPL_SECTORS = 60; // keep SPL clear of uboot_a at 0x10000
+const e = Buffer.alloc(16);
+e.writeUInt16LE(1, 0);            // sect_off = 1 (relative to idblock)
+e.writeUInt16LE(SPL_SECTORS, 2);  // nsect
+e.writeUInt32LE(0xffffffff, 4);   // marker
+e.writeUInt32LE(0, 8);            // index
+e.copy(img, RKNS_OFF + 0x10);     // first record right after magic
+// Build a minimal fake SPL: prologue + anchor strings
+// We need: "U-Boot SPL 2", "Trying fit image at 0x%lx sector\n", "## Verified-boot: %d\n",
+// "Can't find expected crypto device\n", "Jumping to U-Boot", plus an stp x29,x30 prologue and adrp+add+bl referencing the anchor.
+const spl = Buffer.alloc(SPL_SECTORS * 512, 0x00);
+// fill with nops
+for (let i = 0; i < spl.length; i += 4) spl.writeUInt32LE(0xd503201f, i);
+// prologue at 0x100: stp x29,x30,[sp,#-32]!  encoding 0xa9bf7bfd (imm7=-8) -> mask a980_7bfd? is_prologue checks w & 0xffc07fff == 0xa9807bfd so 0xa9bf7bfd works (imm ignored)
+spl.writeUInt32LE(0xa9bf7bfd, 0x100);
+// strings area at 0x2000
+const strOff = 0x2000;
+const put = (s, o) => { Buffer.from(s, "latin1").copy(spl, o); return o; };
+const aOff = strOff + 32;                   // Trying fit image...
+Buffer.from("U-Boot SPL 2.0").copy(spl, strOff);  // looks_like_spl marker
+put("Trying fit image at 0x%lx sector\n", aOff);
+const vbOff = aOff + 40;                    // VB anchor
+put("## Verified-boot: %d\n", vbOff);
+const hashOff = vbOff + 32;                 // hash anchor
+put("Can't find expected crypto device\n", hashOff);
+const jOff = hashOff + 48;                  // Jumping to U-Boot
+put("Jumping to U-Boot", jOff);
+// code: at 0x110, adrp x0, <page of aOff> ; add x0,x0,<off-in-page> ; bl <printf>
+// page = (0x2000 & ~0xfff) = 0x2000; off_in_page = 0
+// adrp x0, 0x2000 from pc=0x110: immhi/immlo = (0x2000 - (0x110 & ~0xfff=0x0)) >> 12 = 2
+{
+  const pc = 0x110;
+  const target = 0x2000;
+  const rel = (target >> 12) - (pc >> 12);
+  const immlo = rel & 3, immhi = (rel >> 2) & 0x7ffff;
+  const adrp = (1 << 31) | (0b10000 << 24) | (immlo << 29) | (immhi << 5) | 0;
+  spl.writeUInt32LE(adrp >>> 0, pc);
+}
+spl.writeUInt32LE((0x91000000 | (0x20 << 10)) >>> 0, 0x114);  // add x0,x0,#0x20 (off-in-page of anchor)
+// bl to a "printf" stub at 0x130: bl encodes (0x130 - 0x118)/4 = 6
+spl.writeUInt32LE(((0b100101 << 26) | 6) >>> 0, 0x118);
+// printf stub at 0x130: ret
+spl.writeUInt32LE(0xd65f03c0, 0x130);
+// prologue-scan anchor requires the adrp+add reference; walk-back from ref (0x110) finds prologue at 0x100. Good.
+// copy SPL into image
+spl.copy(img, SPL_OFF);
 
 // ---- AvbABData in misc ----
 const miscStart = 96 * SECTOR;

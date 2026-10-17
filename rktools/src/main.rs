@@ -3,6 +3,7 @@ use clap::{ArgAction, Parser, Subcommand};
 mod common;
 mod nolimit;
 mod progress;
+mod splsim;
 mod storage;
 mod subcommands;
 mod util;
@@ -67,6 +68,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: nolimit::NolimitCommands,
     },
+    #[command(
+        about = "Emulate SPL -> U-Boot hand-off on a dump (rockchip_splsim)",
+        visible_alias("sim")
+    )]
+    Splsim(subcommands::splsim_cmd::Args),
 }
 
 fn main() {
@@ -98,6 +104,9 @@ fn handle_command(cmd: &Commands) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Upgrade(args) => subcommands::upgrade::exec(rusb::Context::new()?, args)?,
         Commands::Dump(args) => subcommands::dump::exec(rusb::Context::new()?, args)?,
         Commands::Nolimit { cmd } => nolimit::exec(cmd)?,
+        Commands::Splsim(args) => subcommands::splsim_cmd::exec(args)?,
+        Commands::Splsim(args) => subcommands::splsim_cmd::exec(args)?,
+        Commands::Splsim(args) => subcommands::splsim_cmd::exec(args)?,
     }
     Ok(())
 }

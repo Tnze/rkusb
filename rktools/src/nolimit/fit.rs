@@ -8,7 +8,6 @@
 
 use super::fdt::{Fdt, FdtError};
 use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
 use flate2::Compression;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};

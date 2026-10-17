@@ -6,6 +6,7 @@ pub mod list;
 pub mod otp;
 pub mod reset;
 pub mod sn;
+pub mod splsim_cmd;
 pub mod storage;
 pub mod upgrade;
 pub mod vendor;
