@@ -245,6 +245,18 @@ mod tests {
         assert!(stalled < moving * 0.9, "stalled {stalled}");
     }
 
+    /// Drives a whole bar through its draw paths; run with --nocapture to inspect
+    /// the rendered lines (10 % steps when stderr is not a terminal).
+    #[test]
+    fn draws_a_full_bar() {
+        let total = 10 * 1024 * 1024;
+        let mut bar = ProgressBar::new("read test", total);
+        for step in 1..=10u64 {
+            bar.set(step * 1024 * 1024, total);
+        }
+        bar.finish();
+    }
+
     #[test]
     fn rate_ignores_samples_inside_the_interval() {
         let start = Instant::now();
