@@ -34,7 +34,7 @@ pub struct Args {
         long,
         value_parser = humantime::parse_duration,
         default_value = "300s",
-        help = "Total timeout for this upgrade-loader command"
+        help = "USB stall timeout: a chunk that makes no progress for this long is retried"
     )]
     timeout: Duration,
 }

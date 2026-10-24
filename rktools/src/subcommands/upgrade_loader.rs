@@ -34,7 +34,7 @@ pub struct Args {
         long,
         value_parser = humantime::parse_duration,
         default_value = "5s",
-        help = "USB timeout per transfer chunk"
+        help = "USB stall timeout: a chunk that makes no progress for this long is retried"
     )]
     timeout: Duration,
     #[arg(

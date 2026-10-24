@@ -6,7 +6,7 @@ use std::{
 
 use crc::{Crc, CRC_16_IBM_3740};
 use humansize::SizeFormatter;
-use log::{debug, info, trace};
+use log::{debug, info, trace, warn};
 use thiserror::Error;
 use zerocopy::{
     little_endian::{U16, U32},
@@ -27,12 +27,27 @@ pub mod usb;
 #[cfg(all(target_os = "windows", feature = "rockusb"))]
 mod rockusb;
 
-/// Per USB CBW-transaction timeout. Large LBA transfers iterate in chunks and
-/// apply this budget to each chunk instead of the whole operation.
+/// Per USB *stall* timeout. This is not a wall-clock budget for the whole
+/// transfer: every stage of a CBW transaction gets its own fresh budget, and a
+/// data stage is additionally granted at least
+/// payload_len / MIN_TRANSFER_BYTES_PER_SEC. A large transfer is therefore never
+/// aborted merely for taking a long time. A chunk that does hit the watchdog is
+/// retried CHUNK_RETRIES times after the bulk endpoints are resynchronised.
 pub const USB_TIMEOUT: Duration = Duration::from_secs(5);
 pub const STORAGE_SECTOR_SIZE: usize = 512;
 const MAX_LBA_TRANSFER_SECTORS: usize = 128;
 const MAX_LBA_TRANSFER_BYTES: usize = MAX_LBA_TRANSFER_SECTORS * STORAGE_SECTOR_SIZE;
+/// How many times a single chunk transfer is retried before the whole operation
+/// is abandoned.
+const CHUNK_RETRIES: usize = 3;
+/// Slowest throughput a healthy device is assumed to sustain. A data stage is
+/// always granted at least payload_len / MIN_TRANSFER_BYTES_PER_SEC of budget
+/// (64 KiB/s means 64 KiB gets 1 s and 512 KiB gets 8 s), which keeps a big
+/// transfer from looking like a stall just because it is big.
+const MIN_TRANSFER_BYTES_PER_SEC: u64 = 64 * 1024;
+/// Slowest rate at which media is assumed to erase. An ERASE_LBA command carries
+/// no payload, so its wait is sized from the erased span instead.
+const MIN_ERASE_BYTES_PER_SEC: u64 = 1024 * 1024;
 /// Loader-interpreted vendor-storage LBA used by xrock for the serial number.
 pub const VENDOR_SN_LBA: u32 = 0xFFF0_0001;
 const VENDOR_LBA_BASE: u32 = 0xFFF0_0000;
@@ -592,6 +607,53 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         pos.checked_add(sectors).ok_or(RkUsbError::LbaOverflow)
     }
 
+    /// Run one chunk transfer, retrying failures that happened at the USB level.
+    ///
+    /// A timeout or pipe error leaves the bulk endpoints in an unknown state, so
+    /// both are cleared before the retry. Command-level errors mean the device
+    /// did answer the request, so they are reported immediately rather than
+    /// replayed.
+    fn transfer_chunk(
+        &mut self,
+        op: &str,
+        mut f: impl FnMut(&mut Self) -> Result<(), RkUsbError>,
+    ) -> Result<(), RkUsbError> {
+        let mut attempt = 0usize;
+        loop {
+            match f(self) {
+                Ok(()) => return Ok(()),
+                Err(err) if Self::is_transient(&err) && attempt + 1 < CHUNK_RETRIES => {
+                    attempt += 1;
+                    warn!(
+                        "{op}: {err}; resyncing USB endpoints and retrying ({attempt}/{})",
+                        CHUNK_RETRIES - 1
+                    );
+                    self.resync_bulk_endpoints();
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    fn is_transient(err: &RkUsbError) -> bool {
+        matches!(
+            err,
+            RkUsbError::Usb(
+                rusb::Error::Timeout
+                    | rusb::Error::Pipe
+                    | rusb::Error::Io
+                    | rusb::Error::Overflow
+                    | rusb::Error::Interrupted
+            )
+        )
+    }
+
+    fn resync_bulk_endpoints(&mut self) {
+        let _ = self.device.clear_halt(self.bulk_in);
+        let _ = self.device.clear_halt(self.bulk_out);
+        sleep(Duration::from_millis(100 * CHUNK_RETRIES as u64));
+    }
+
     fn cbw_transaction(
         &mut self,
         cbw: &usb::Cbw<usb::Cbwcb>,
@@ -610,7 +672,17 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         timeout: Duration,
         require_full_in: bool,
     ) -> Result<usize, RkUsbError> {
-        let deadline = Instant::now() + timeout;
+        // Each stage of the transaction gets its own fresh budget. Previously a
+        // single deadline was shared by the CBW write, the data stage and the
+        // CSW read, so a slow (but progressing) data stage consumed the budget
+        // of the CSW wait and large transfers failed with a spurious timeout.
+        let payload_len = data_out
+            .map(<[u8]>::len)
+            .or_else(|| data_in.as_ref().map(|buf| buf.len()))
+            .unwrap_or(0);
+        let stage_timeout = timeout.max(Duration::from_secs_f64(
+            payload_len as f64 / MIN_TRANSFER_BYTES_PER_SEC as f64,
+        ));
 
         let opcode = cbw.cb.oper_code;
         let cbw_tag = cbw.tag;
@@ -619,7 +691,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         let n = self.device.write_bulk(
             self.bulk_out,
             cbw.as_bytes(),
-            Self::remaining_timeout(deadline)?,
+            Self::remaining_timeout(Instant::now() + timeout)?,
         )?;
         if n != std::mem::size_of::<usb::Cbw<usb::Cbwcb>>() {
             return Err(RkUsbError::Usb(rusb::Error::Io));
@@ -627,9 +699,11 @@ impl<T: rusb::UsbContext> RkDevice<T> {
 
         if let Some(buf) = data_out {
             trace!("Writing data stage bytes={}", buf.len());
-            let n =
-                self.device
-                    .write_bulk(self.bulk_out, buf, Self::remaining_timeout(deadline)?)?;
+            let n = self.device.write_bulk(
+                self.bulk_out,
+                buf,
+                Self::remaining_timeout(Instant::now() + stage_timeout)?,
+            )?;
             if n != buf.len() {
                 return Err(RkUsbError::Usb(rusb::Error::Io));
             }
@@ -637,9 +711,11 @@ impl<T: rusb::UsbContext> RkDevice<T> {
 
         let data_in_len = if let Some(buf) = data_in {
             trace!("Reading data stage bytes={}", buf.len());
-            let n = self
-                .device
-                .read_bulk(self.bulk_in, buf, Self::remaining_timeout(deadline)?)?;
+            let n = self.device.read_bulk(
+                self.bulk_in,
+                buf,
+                Self::remaining_timeout(Instant::now() + stage_timeout)?,
+            )?;
             let expected_min = cbw.data_transfer_length as usize;
             if n == 0 || n > buf.len() {
                 return Err(RkUsbError::Usb(rusb::Error::Io));
@@ -656,7 +732,7 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         let n = self.device.read_bulk(
             self.bulk_in,
             &mut csw_buf,
-            Self::remaining_timeout(deadline)?,
+            Self::remaining_timeout(Instant::now() + stage_timeout)?,
         )?;
         if n != csw_buf.len() {
             return Err(RkUsbError::InvalidCsw);
@@ -983,17 +1059,24 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         let mut done = 0u64;
 
         for chunk in aligned.chunks(MAX_LBA_TRANSFER_BYTES) {
-            self.write_lba_raw(next_pos, chunk, subcode, timeout)?;
-            next_pos = Self::advance_lba_by_bytes(next_pos, chunk.len())?;
-            done += chunk.len() as u64;
+            let chunk_len = chunk.len();
+            self.transfer_chunk("WRITE_LBA", |dev| {
+                dev.write_lba_raw(next_pos, chunk, subcode, timeout)
+            })?;
+            next_pos = Self::advance_lba_by_bytes(next_pos, chunk_len)?;
+            done += chunk_len as u64;
             progress(done, total);
         }
 
         if !tail.is_empty() {
             let mut sector = [0u8; STORAGE_SECTOR_SIZE];
-            self.read_lba_raw(next_pos, &mut sector, subcode, timeout)?;
+            self.transfer_chunk("WRITE_LBA", |dev| {
+                dev.read_lba_raw(next_pos, &mut sector, subcode, timeout)
+            })?;
             sector[..tail.len()].copy_from_slice(tail);
-            self.write_lba_raw(next_pos, &sector, subcode, timeout)?;
+            self.transfer_chunk("WRITE_LBA", |dev| {
+                dev.write_lba_raw(next_pos, &sector, subcode, timeout)
+            })?;
             progress(total, total);
         }
 
@@ -1052,15 +1135,20 @@ impl<T: rusb::UsbContext> RkDevice<T> {
         let mut done = 0u64;
 
         for chunk in aligned.chunks_mut(MAX_LBA_TRANSFER_BYTES) {
-            self.read_lba_raw(next_pos, chunk, subcode, timeout)?;
-            next_pos = Self::advance_lba_by_bytes(next_pos, chunk.len())?;
-            done += chunk.len() as u64;
+            let chunk_len = chunk.len();
+            self.transfer_chunk("READ_LBA", |dev| {
+                dev.read_lba_raw(next_pos, &mut chunk[..], subcode, timeout)
+            })?;
+            next_pos = Self::advance_lba_by_bytes(next_pos, chunk_len)?;
+            done += chunk_len as u64;
             progress(done, total);
         }
 
         if !tail.is_empty() {
             let mut sector = [0u8; STORAGE_SECTOR_SIZE];
-            self.read_lba_raw(next_pos, &mut sector, subcode, timeout)?;
+            self.transfer_chunk("READ_LBA", |dev| {
+                dev.read_lba_raw(next_pos, &mut sector, subcode, timeout)
+            })?;
             tail.copy_from_slice(&sector[..tail.len()]);
             progress(total, total);
         }
@@ -1111,7 +1199,17 @@ impl<T: rusb::UsbContext> RkDevice<T> {
 
         while remaining != 0 {
             let chunk_sectors = remaining.min(u16::MAX as u32);
-            self.erase_lba_raw(next_pos, chunk_sectors as u16, timeout)?;
+            // An erase command moves no USB payload, so the size-based data
+            // budget does not apply to it; the device is busy erasing flash
+            // while we wait. Grant the wait time in proportion to the erased
+            // span so a 32 MiB command is not called a stall after 5 s.
+            let chunk_timeout = timeout.max(Duration::from_secs_f64(
+                (chunk_sectors as u64 * STORAGE_SECTOR_SIZE as u64) as f64
+                    / MIN_ERASE_BYTES_PER_SEC as f64,
+            ));
+            self.transfer_chunk("ERASE_LBA", |dev| {
+                dev.erase_lba_raw(next_pos, chunk_sectors as u16, chunk_timeout)
+            })?;
             next_pos = next_pos
                 .checked_add(chunk_sectors)
                 .ok_or(RkUsbError::LbaOverflow)?;

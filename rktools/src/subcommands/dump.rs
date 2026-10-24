@@ -7,6 +7,7 @@ use clap::Args as ClapArgs;
 
 use crate::common;
 use crate::nolimit::engine;
+use crate::progress::ProgressBar;
 use rkusb::RkDevice;
 
 #[derive(ClapArgs)]
@@ -28,7 +29,7 @@ pub struct Args {
         long,
         value_parser = humantime::parse_duration,
         default_value = "5s",
-        help = "USB timeout per transfer chunk"
+        help = "USB stall timeout: a chunk that makes no progress for this long is retried"
     )]
     timeout: Duration,
     /// Only back up these partitions (by name); default: all except the skip list
@@ -145,6 +146,9 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), Box<dyn std::erro
         let chunk_sectors = 1024usize.min(sectors.max(1) as usize); // 512 KiB chunks
         let mut remaining = sectors as usize;
         let mut abs_off = existing * 512;
+        let total_bytes = existing * 512 + sectors as u64 * 512;
+        let mut bar = ProgressBar::new(format!("read {base}"), total_bytes);
+        bar.set(abs_off, total_bytes);
         while remaining > 0 {
             let n = chunk_sectors.min(remaining);
             let mut buf = vec![0u8; n * 512];
@@ -174,6 +178,10 @@ Output truncated to {}. Patch U-Boot first: rktools nl fix",
             abs_off += buf.len() as u64;
             start += n as u32;
             remaining -= n;
+            bar.set(abs_off, total_bytes);
+        }
+        if remaining == 0 {
+            bar.finish();
         }
     }
 
