@@ -58,6 +58,8 @@ impl Cbw<Cbwcb> {
             | 0x1A /* READ_FLASH_INFO */
             | 0x1B /* READ_CHIP_INFO */
             | 0x20 /* READ_EFUSE */
+            | 0x28 /* READ_COM_LOG */
+            | 0x2C /* READ_OTP_CHIP */
             | 0xAA /* READ_CAPABILITY */
             | 0x2B /* READ_STORAGE */ => {
                 cbw.flags = DIRECTION_IN;
@@ -79,7 +81,8 @@ impl Cbw<Cbwcb> {
             | 0x14 /* READ_LBA */
             | 0x17 /* READ_SDRAM */
             | 0x21 /* READ_SPI_FLASH */
-            | 0x24 /* READ_NEW_EFUSE */ => {
+            | 0x24 /* READ_NEW_EFUSE */
+            | 0x27 /* READ_VENDOR_STORAGE */ => {
                 cbw.flags = DIRECTION_IN;
                 cbw.cb_length = 0x0A;
             }
@@ -94,7 +97,8 @@ impl Cbw<Cbwcb> {
             | 0x1F /* WRITE_EFUSE */
             | 0x22 /* WRITE_SPI_FLASH */
             | 0x23 /* WRITE_NEW_EFUSE */
-            | 0x25 /* ERASE_LBA */ => {
+            | 0x25 /* ERASE_LBA */
+            | 0x26 /* WRITE_VENDOR_STORAGE */ => {
                 cbw.flags = DIRECTION_OUT;
                 cbw.cb_length = 0x0A;
             }

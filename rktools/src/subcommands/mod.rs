@@ -1,9 +1,14 @@
 pub mod download_boot;
+pub mod dump;
 pub mod info;
 pub mod lba;
 pub mod list;
+pub mod otp;
 pub mod reset;
+pub mod sn;
+pub mod splsim_cmd;
 pub mod storage;
 pub mod upgrade;
+pub mod vendor;
 pub mod upgrade_loader;
 pub mod wait;

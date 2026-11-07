@@ -1,7 +1,4 @@
-use std::{
-    fs::File,
-    time::{Duration, Instant},
-};
+use std::{fs::File, time::Duration};
 
 use memmap2::Mmap;
 use rkusb::{
@@ -13,7 +10,8 @@ use thiserror::Error;
 
 use crate::{
     common::{self, DeviceSelectionError},
-    util::{parse_u8, parse_u32, timeout_to},
+    progress::ProgressBar,
+    util::{format_bytes, parse_u8, parse_u32},
 };
 
 const SECTOR_SIZE: usize = 512;
@@ -35,8 +33,8 @@ pub struct Args {
     #[arg(
         long,
         value_parser = humantime::parse_duration,
-        default_value = "300s",
-        help = "Total timeout for this upgrade-loader command"
+        default_value = "5s",
+        help = "USB stall timeout: a chunk that makes no progress for this long is retried"
     )]
     timeout: Duration,
     #[arg(
@@ -84,23 +82,30 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), UpgradeLoaderErro
     let loader_head = find_loader_entry(&boot_img, ENTRY_FLASH_HEAD).ok();
     let rc4_enabled = unsafe { (*boot_img.boot_header_ptr()).rc4_flag != 0 };
 
-    let timeout = timeout_to(
-        Instant::now() + args.timeout,
-        RkUsbError::Usb(rusb::Error::Timeout),
-    );
-
     if loader_head.is_some() {
-        let capability = rkdev.read_capability(timeout()?)?;
+        let capability = rkdev.read_capability(args.timeout)?;
         if (capability[1] & 1) == 0 {
             return Err(UpgradeLoaderError::FlashHeadNotSupported);
         }
     }
 
     let idblock_data = idblock::build_idblock(loader_head, loader_data, loader_code, rc4_enabled)?;
-    rkdev.write_lba(args.lba, &idblock_data, args.subcode, timeout()?)?;
+    let mut bar = ProgressBar::new(
+        format!("Write IDBlock {}", format_bytes(idblock_data.len() as u64)),
+        idblock_data.len() as u64,
+    );
+    rkdev.write_lba_with_progress(
+        args.lba,
+        &idblock_data,
+        args.subcode,
+        args.timeout,
+        &mut |done, total| bar.set(done, total),
+    )?;
+    bar.finish();
     println!(
-        "Upgrade loader OK, wrote {} sectors to LBA {}",
+        "Upgrade loader OK, wrote {} sectors ({}) to LBA {}",
         idblock_data.len() / SECTOR_SIZE,
+        format_bytes(idblock_data.len() as u64),
         args.lba
     );
     Ok(())

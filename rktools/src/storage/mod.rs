@@ -9,7 +9,8 @@ use std::{
 
 pub(crate) const SECTOR_SIZE: u64 = 512;
 pub(crate) const DEFAULT_LBA_SUBCODE: u8 = 0;
-pub(crate) const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(30);
+/// Per-chunk USB timeout. Whole-range duration is determined by transfer size.
+pub(crate) const DEFAULT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) struct RkBlockDevice<'a, T: rusb::UsbContext> {
     rkdev: &'a mut RkDevice<T>,
@@ -85,6 +86,12 @@ impl<T: rusb::UsbContext> Read for RkBlockDevice<'_, T> {
         if buf.is_empty() {
             return Ok(0);
         }
+        if self.pos >= self.disk_size_bytes {
+            return Ok(0);
+        }
+        let max_len = usize::try_from(self.disk_size_bytes - self.pos).unwrap_or(usize::MAX);
+        let max_len = max_len.min(buf.len());
+        let buf = &mut buf[..max_len];
         let read_len = buf.len();
         let end_pos = self
             .pos
@@ -153,6 +160,19 @@ impl<T: rusb::UsbContext> Write for RkBlockDevice<'_, T> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
+        }
+        if self.pos >= self.disk_size_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "write past end of disk",
+            ));
+        }
+        let max_len = usize::try_from(self.disk_size_bytes - self.pos).unwrap_or(usize::MAX);
+        if buf.len() > max_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "write exceeds disk size",
+            ));
         }
         let end_pos = self.pos.checked_add(buf.len() as u64).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "write position overflow")
@@ -237,7 +257,7 @@ impl<T: rusb::UsbContext> Seek for RkBlockDevice<'_, T> {
         };
 
         self.pos = new_pos
-            .filter(|x| *x < self.disk_size_bytes)
+            .filter(|x| *x <= self.disk_size_bytes)
             .ok_or(io::Error::new(io::ErrorKind::InvalidInput, "out of range"))?;
         Ok(self.pos)
     }

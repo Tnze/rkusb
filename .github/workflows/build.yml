@@ -1,0 +1,172 @@
+name: build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Native runners execute tests and link the system libusb.
+  # Intel macOS is cross-compiled separately on Apple Silicon.
+  native:
+    name: native (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install libusb (macOS)
+        if: runner.os == 'macOS'
+        run: brew install libusb
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --target ${{ matrix.target }}
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package artifact (Unix)
+        if: runner.os != 'Windows'
+        run: tar -C target/${{ matrix.target }}/release -czvf rktools-${{ matrix.target }}.tar.gz rktools
+
+      - name: Package artifact (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path target/${{ matrix.target }}/release/rktools.exe -DestinationPath rktools-${{ matrix.target }}.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rktools-${{ matrix.target }}
+          path: rktools-${{ matrix.target }}.*
+
+  # Cross-compile Intel macOS on Apple Silicon without Intel Homebrew or Rosetta.
+  macos-cross:
+    name: cross (x86_64-apple-darwin)
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Apple Silicon host
+        run: test "$(uname -m)" = arm64
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cross-compile workspace tests (do not execute Intel binaries)
+        run: cargo test --workspace --target x86_64-apple-darwin --features rkusb/vendored --no-run
+
+      - name: Build Intel release with bundled libusb
+        run: cargo build --release -p rktools --target x86_64-apple-darwin --features rkusb/vendored
+
+      - name: Verify Intel artifact
+        run: lipo target/x86_64-apple-darwin/release/rktools -verify_arch x86_64
+
+      - name: Package artifact
+        run: tar -C target/x86_64-apple-darwin/release -czvf rktools-x86_64-apple-darwin.tar.gz rktools
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rktools-x86_64-apple-darwin
+          path: rktools-x86_64-apple-darwin.tar.gz
+
+  # Cross-compiled Linux targets in cross containers. The `vendored` feature
+  # statically embeds libusb, so no per-arch libusb packages are needed in the
+  # containers. Explicit crt-static is required on targets such as RISC-V;
+  # reject any dynamic interpreter or shared-library dependency before packaging.
+  cross:
+    name: cross (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - armv7-unknown-linux-musleabihf
+          - riscv64gc-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Test native-architecture Linux musl target
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: cross test --workspace --target ${{ matrix.target }} --features rkusb/vendored --config 'target.${{ matrix.target }}.rustflags=["-C", "target-feature=+crt-static"]'
+
+      - name: Build static release
+        run: cross build --release -p rktools --target ${{ matrix.target }} --features rkusb/vendored --config 'target.${{ matrix.target }}.rustflags=["-C", "target-feature=+crt-static"]'
+
+      - name: Verify fully static ELF
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/$TARGET/release/rktools"
+          file "$binary"
+          if readelf -lW "$binary" | grep -q INTERP; then
+            echo "::error::ELF contains a dynamic interpreter"
+            exit 1
+          fi
+          if readelf -dW "$binary" | grep -q '(NEEDED)'; then
+            echo "::error::ELF depends on shared libraries"
+            exit 1
+          fi
+
+      - name: Package artifact
+        run: tar -C target/${{ matrix.target }}/release -czvf rktools-${{ matrix.target }}.tar.gz rktools
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rktools-${{ matrix.target }}
+          path: rktools-${{ matrix.target }}.*
+
+  # On `v*` tags, publish a GitHub release with every platform artifact.
+  release:
+    name: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [native, macos-cross, cross]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/rktools-*
+
