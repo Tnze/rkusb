@@ -13,11 +13,10 @@ use thiserror::Error;
 
 use crate::{
     common,
+    partition_table::{PartitionTable, timestamp_filename},
     progress::ProgressBar,
     storage::{DEFAULT_IO_TIMEOUT, DEFAULT_LBA_SUBCODE, RkBlockDevice},
-    util::{
-        format_bytes, parse_u8, partition_table_filename, sanitize_filename, storage_label,
-    },
+    util::{format_bytes, parse_u8, sanitize_filename, storage_label},
 };
 
 #[derive(clap::Args)]
@@ -72,6 +71,10 @@ enum PartitionCommand {
         visible_alias("ls")
     )]
     Table(TableArgs),
+    #[command(
+        about = "Validate and preview a JSON partition table; --yes writes primary and backup GPT"
+    )]
+    Apply(ApplyArgs),
     #[command(about = "Read a GPT partition to file", visible_alias("r"))]
     Read(PartitionTransferArgs),
     #[command(about = "Write file to a GPT partition", visible_alias("w"))]
@@ -84,11 +87,39 @@ enum PartitionCommand {
 }
 
 #[derive(clap::Args)]
+struct ApplyArgs {
+    /// Edited partition-table JSON exported from this device
+    path: PathBuf,
+    /// Write GPT after validation and automatic backup (partition data is not moved)
+    #[arg(long, conflicts_with = "dry_run")]
+    yes: bool,
+    /// Explicitly preview only (the default)
+    #[arg(long)]
+    dry_run: bool,
+    /// Directory for the mandatory timestamped JSON backup
+    #[arg(long, default_value = ".")]
+    backup_dir: PathBuf,
+}
+
+#[derive(clap::Args)]
 struct TableArgs {
-    #[arg(short, long, help = "Override output path of the generated partition table file")]
+    #[arg(
+        short,
+        long,
+        help = "Override output path of the generated partition table file"
+    )]
     output: Option<String>,
     #[arg(long, help = "Print the table only; do not write a file")]
     no_save: bool,
+    /// Output format (JSON supports round-trip editing and apply)
+    #[arg(long, value_enum, default_value = "json")]
+    format: TableFormat,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum TableFormat {
+    Json,
+    Txt,
 }
 
 #[derive(clap::Args)]
@@ -151,26 +182,83 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), Box<dyn std::erro
                 1 => LogicalBlockSize::Lb512,
                 8 => LogicalBlockSize::Lb4096,
                 x => {
-                    eprintln!("Unsupported LBA size: {x}");
-                    return Ok(());
+                    return Err(format!("Unsupported LBA size: {x}").into());
                 }
             };
+            let mut device = RkBlockDevice::new(
+                &mut rkdev,
+                info.flash_size_bytes(),
+                DEFAULT_LBA_SUBCODE,
+                timeout,
+            );
+            // Read the header before the GPT crate asserts its supported entry size.
+            let header = gpt::header::read_header_from_arbitrary_device(&mut device, lb_size)?;
+            if header.part_size != 128 {
+                return Err(format!(
+                    "Unsupported GPT entry size: {} (expected 128)",
+                    header.part_size
+                )
+                .into());
+            }
             let mut disk = gpt::GptConfig::new()
-                .writable(false)
+                .writable(matches!(&partition_args.command, PartitionCommand::Apply(a) if a.yes))
                 .logical_block_size(lb_size)
-                .open_from_device(RkBlockDevice::try_from(&mut rkdev)?)?;
+                .open_from_device(device)?;
             let partitions = disk.partitions();
 
             match &partition_args.command {
                 PartitionCommand::Table(table_args) => {
-                    let text = format_partition_table(storage, &info, lb_size, partitions);
+                    let table = PartitionTable::from_disk(&disk, storage, info.flash_size_bytes())?;
+                    let text = match table_args.format {
+                        TableFormat::Json => serde_json::to_string_pretty(&table)? + "\n",
+                        TableFormat::Txt => {
+                            format_partition_table(storage, &info, lb_size, partitions)
+                        }
+                    };
                     print!("{text}");
                     if !table_args.no_save {
                         let path = table_args.output.clone().unwrap_or_else(|| {
-                            partition_table_filename(storage, &info)
+                            let name = timestamp_filename(false);
+                            match table_args.format {
+                                TableFormat::Json => name,
+                                TableFormat::Txt => name.replace(".json", ".txt"),
+                            }
                         });
-                        fs::write(&path, &text)?;
-                        println!("Wrote partition table to {path}");
+                        use std::io::Write;
+                        let mut file = OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&path)?;
+                        file.write_all(text.as_bytes())?;
+                        file.sync_all()?;
+                        eprintln!("Wrote partition table to {path}");
+                    }
+                }
+                PartitionCommand::Apply(apply_args) => {
+                    let contents = fs::read_to_string(&apply_args.path)
+                        .map_err(|e| format!("cannot read {}: {e}", apply_args.path.display()))?;
+                    let proposed: PartitionTable =
+                        serde_json::from_str(&contents).map_err(|e| {
+                            format!("invalid JSON in {}: {e}", apply_args.path.display())
+                        })?;
+                    let current =
+                        PartitionTable::from_disk(&disk, storage, info.flash_size_bytes())?;
+                    let updated = proposed.validate_against(&current)?;
+                    print!("{}", proposed.diff(&current));
+                    eprintln!(
+                        "Partition metadata only: data is not moved or resized. Back up files before changing ranges."
+                    );
+                    if !apply_args.yes {
+                        println!("Dry-run: no device writes. Use --yes to apply this table.");
+                    } else {
+                        fs::create_dir_all(&apply_args.backup_dir)?;
+                        let backup = apply_args.backup_dir.join(timestamp_filename(true));
+                        current.save_new(&backup)?;
+                        println!("Saved current table to {}", backup.display());
+                        crate::partition_apply::apply(disk, updated)?;
+                        println!(
+                            "Partition table applied; primary and backup GPT verified. Reboot the device to reload it."
+                        );
                     }
                 }
                 PartitionCommand::Read(read_args) => {
@@ -185,13 +273,7 @@ pub fn exec(usb_ctx: rusb::Context, args: &Args) -> Result<(), Box<dyn std::erro
                     let parts: Vec<(u32, Partition)> =
                         partitions.iter().map(|(i, p)| (*i, p.clone())).collect();
                     exec_partition_dump(
-                        &mut disk,
-                        storage,
-                        &info,
-                        lb_size,
-                        &parts,
-                        dump_args,
-                        timeout,
+                        &mut disk, storage, &info, lb_size, &parts, dump_args, timeout,
                     )?;
                 }
             }
@@ -292,7 +374,10 @@ fn format_partition_table(
     ));
 
     for (index, part) in partitions {
-        let sectors = part.last_lba.saturating_sub(part.first_lba).saturating_add(1);
+        let sectors = part
+            .last_lba
+            .saturating_sub(part.first_lba)
+            .saturating_add(1);
         let bytes = sectors.saturating_mul(lb_bytes);
         out.push_str(&format!(
             "{index:>4}  {:<20} {:>12} {:>12} {:>12} {:>12}  {}\n",
@@ -342,15 +427,9 @@ fn exec_partition_read<T: rusb::UsbContext>(
             .inspect_err(|e| error!("failed to map output file: {e}"))
             .map_err(PartitionTransferError::MemoryMap)?
     };
-    let pos = u32::try_from(part.first_lba)
-        .inspect_err(|e| error!("partition first_lba is out of u32 range for read: {e}"))
-        .map_err(|_| PartitionTransferError::LbaOverflow)?;
+    let pos = transport_lba(part.first_lba, *disk.logical_block_size())?;
     let mut bar = ProgressBar::new(
-        format!(
-            "Read '{}' {}",
-            part.name,
-            format_bytes(output_len)
-        ),
+        format!("Read '{}' {}", part.name, format_bytes(output_len)),
         output_len,
     );
     disk.device_mut()
@@ -376,6 +455,16 @@ fn exec_partition_read<T: rusb::UsbContext>(
         path
     );
     Ok(())
+}
+
+fn transport_lba(
+    first_lba: u64,
+    block_size: LogicalBlockSize,
+) -> Result<u32, PartitionTransferError> {
+    let sector = first_lba
+        .checked_mul(u64::from(block_size) / 512)
+        .ok_or(PartitionTransferError::LbaOverflow)?;
+    u32::try_from(sector).map_err(|_| PartitionTransferError::LbaOverflow)
 }
 
 fn exec_partition_write<T: rusb::UsbContext>(
@@ -404,15 +493,9 @@ fn exec_partition_write<T: rusb::UsbContext>(
         );
         return Err(PartitionTransferError::InputTooLarge);
     }
-    let pos = u32::try_from(part.first_lba)
-        .inspect_err(|e| error!("partition first_lba is out of u32 range for write: {e}"))
-        .map_err(|_| PartitionTransferError::LbaOverflow)?;
+    let pos = transport_lba(part.first_lba, *disk.logical_block_size())?;
     let mut bar = ProgressBar::new(
-        format!(
-            "Write '{}' {}",
-            part.name,
-            format_bytes(input_len)
-        ),
+        format!("Write '{}' {}", part.name, format_bytes(input_len)),
         input_len,
     );
     disk.device_mut()
@@ -445,19 +528,19 @@ fn exec_partition_dump<T: rusb::UsbContext>(
     parts: &[(u32, Partition)],
     args: &DumpArgs,
     timeout: Duration,
-) -> Result<(), PartitionTransferError> {
+) -> Result<(), Box<dyn std::error::Error>> {
     let label = storage_label(storage, info);
     let out_dir = PathBuf::from(args.dir.clone().unwrap_or_else(|| label.clone()));
     fs::create_dir_all(&out_dir)?;
 
-    let table_name = partition_table_filename(storage, info);
+    let table_name = timestamp_filename(false);
     let table_path = out_dir.join(&table_name);
     let mut table_map = BTreeMap::new();
     for (index, part) in parts {
         table_map.insert(*index, part.clone());
     }
     let table_text = format_partition_table(storage, info, lb_size, &table_map);
-    fs::write(&table_path, &table_text)?;
+    PartitionTable::from_disk(disk, storage, info.flash_size_bytes())?.save_new(&table_path)?;
     print!("{table_text}");
     println!("Wrote partition table to {}", table_path.display());
 
@@ -514,6 +597,50 @@ fn unique_image_name(name: &str, used: &mut HashSet<String>) -> String {
     }
     used.insert(candidate.clone());
     candidate
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn transport_addresses_convert_logical_blocks_and_reject_overflow() {
+        assert_eq!(transport_lba(2048, LogicalBlockSize::Lb512).unwrap(), 2048);
+        assert_eq!(
+            transport_lba(2048, LogicalBlockSize::Lb4096).unwrap(),
+            16384
+        );
+        assert!(transport_lba(u32::MAX as u64, LogicalBlockSize::Lb4096).is_err());
+        assert!(transport_lba(u64::MAX, LogicalBlockSize::Lb4096).is_err());
+    }
+    #[test]
+    fn apply_defaults_to_preview_and_disallows_conflicting_flags() {
+        use clap::Parser;
+        let cli =
+            crate::Cli::try_parse_from(["rktools", "storage", "partition", "apply", "layout.json"])
+                .unwrap();
+        let crate::Commands::Storage(args) = cli.command else {
+            panic!("expected storage")
+        };
+        let Command::Partition(args) = args.command else {
+            panic!("expected partition")
+        };
+        let PartitionCommand::Apply(args) = args.command else {
+            panic!("expected apply")
+        };
+        assert!(!args.yes);
+        assert!(
+            crate::Cli::try_parse_from([
+                "rktools",
+                "storage",
+                "partition",
+                "apply",
+                "layout.json",
+                "--yes",
+                "--dry-run"
+            ])
+            .is_err()
+        );
+    }
 }
 
 fn path_to_str(path: &Path) -> Result<&str, PartitionTransferError> {

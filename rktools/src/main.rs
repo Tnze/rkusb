@@ -2,6 +2,8 @@ use clap::{ArgAction, Parser, Subcommand};
 
 mod common;
 mod nolimit;
+mod partition_apply;
+mod partition_table;
 mod progress;
 mod splsim;
 mod storage;
@@ -56,9 +58,7 @@ enum Commands {
     Otp(subcommands::otp::Args),
     #[command(about = "Upgrade device by using update.img")]
     Upgrade(subcommands::upgrade::Args),
-    #[command(
-        about = "Batch-backup partitions per GPT (detects the 32 MiB 0xCC read wall)"
-    )]
+    #[command(about = "Batch-backup partitions per GPT (detects the 32 MiB 0xCC read wall)")]
     Dump(subcommands::dump::Args),
     #[command(
         about = "Remove the rockusb 32 MiB read limit from a flash dump",
@@ -109,6 +109,50 @@ fn handle_command(cmd: &Commands) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Splsim(args) => subcommands::splsim_cmd::exec(args)?,
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod readme_tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn readme_local_links_resolve() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        for text in [include_str!("../../README.md"), include_str!("../../README.zh-CN.md")] {
+            for suffix in text.split("](").skip(1) {
+                let target = suffix.split(')').next().unwrap();
+                if target.starts_with("https://") || target.starts_with("http://") {
+                    continue;
+                }
+                let path = target.split('#').next().unwrap();
+                assert!(root.join(path).is_file(), "missing README link: {target}");
+            }
+        }
+    }
+
+    #[test]
+    fn documented_commands_parse_without_help_short_circuit() {
+        for (name, text) in [
+            ("README.md", include_str!("../../README.md")),
+            ("README.zh-CN.md", include_str!("../../README.zh-CN.md")),
+        ] {
+            let mut in_code = false;
+            for (index, line) in text.lines().enumerate() {
+                if line.starts_with("```") {
+                    in_code = !in_code;
+                    continue;
+                }
+                if !in_code || !line.starts_with("rktools ") || line.contains("<COMMAND>") {
+                    continue;
+                }
+                let command = line.split('#').next().unwrap().trim();
+                if let Err(error) = Cli::try_parse_from(command.split_whitespace()) {
+                    panic!("{name}:{}: {command}\n{error}", index + 1);
+                }
+            }
+        }
+    }
 }
 
 fn init_logger(verbose: u8) {

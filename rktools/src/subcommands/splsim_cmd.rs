@@ -6,10 +6,10 @@ use crate::splsim::{self, SimOptions};
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// The flash dump (or a bare SPL binary via --spl)
+    /// Flash dump containing a supported RKNS IDBlock/SPL and U-Boot FIT
     dump: PathBuf,
     /// SPL link address (default 0x200000; RK3576 uses 0x40200000)
-    #[arg(long, value_parser = parse_u64_hex, default_value_t = 0x20_0000)]
+    #[arg(long, value_parser = parse_u64_hex, default_value = "0x200000")]
     text_base: u64,
     /// Step budget for the simulation
     #[arg(long, default_value_t = 400_000_000)]
@@ -20,6 +20,25 @@ pub struct Args {
     /// Only simulate the FIT at this byte offset
     #[arg(long, value_parser = parse_u64_hex)]
     fit: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, FromArgMatches};
+
+    #[test]
+    fn default_and_explicit_spl_addresses_match_documentation() {
+        for (extra, expected) in [(None, 0x200000), (Some("0x40200000"), 0x40200000)] {
+            let mut argv = vec!["rktools", "splsim", "dump.bin"];
+            if let Some(value) = extra {
+                argv.extend(["--text-base", value]);
+            }
+            let matches = crate::Cli::command().try_get_matches_from(argv).unwrap();
+            let cli = crate::Cli::from_arg_matches(&matches).unwrap();
+            let crate::Commands::Splsim(args) = cli.command else { panic!("wrong command") };
+            assert_eq!(args.text_base, expected);
+        }
+    }
 }
 
 fn parse_u64_hex(s: &str) -> Result<u64, String> {
