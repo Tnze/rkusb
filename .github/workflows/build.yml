@@ -19,18 +19,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           - os: macos-latest
             target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install libusb (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libusb-1.0-0-dev pkg-config
 
       - name: Install libusb (macOS)
         if: runner.os == 'macOS'
@@ -109,10 +103,9 @@ jobs:
       matrix:
         target:
           - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-gnu
           - aarch64-unknown-linux-musl
-          - armv7-unknown-linux-gnueabihf
-          - riscv64gc-unknown-linux-gnu
+          - armv7-unknown-linux-musleabihf
+          - riscv64gc-unknown-linux-musl
     steps:
       - uses: actions/checkout@v4
 
@@ -125,8 +118,29 @@ jobs:
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Build release
-        run: cross build --release --target ${{ matrix.target }} --features vendored
+      - name: Test native-architecture Linux musl target
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: cross test --workspace --target ${{ matrix.target }} --features rkusb/vendored
+
+      - name: Build static release
+        run: cross build --release -p rktools --target ${{ matrix.target }} --features rkusb/vendored
+
+      - name: Verify fully static ELF
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/$TARGET/release/rktools"
+          file "$binary"
+          if readelf -lW "$binary" | grep -q INTERP; then
+            echo "::error::ELF contains a dynamic interpreter"
+            exit 1
+          fi
+          if readelf -dW "$binary" | grep -q '(NEEDED)'; then
+            echo "::error::ELF depends on shared libraries"
+            exit 1
+          fi
 
       - name: Package artifact
         run: tar -C target/${{ matrix.target }}/release -czvf rktools-${{ matrix.target }}.tar.gz rktools
@@ -141,7 +155,7 @@ jobs:
   release:
     name: release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [native, cross]
+    needs: [native, macos-cross, cross]
     runs-on: ubuntu-latest
     permissions:
       contents: write
