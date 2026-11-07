@@ -81,7 +81,7 @@ jobs:
         run: cargo build --release -p rktools --target x86_64-apple-darwin --features rkusb/vendored
 
       - name: Verify Intel artifact
-        run: lipo -verify_arch x86_64 target/x86_64-apple-darwin/release/rktools
+        run: lipo target/x86_64-apple-darwin/release/rktools -verify_arch x86_64
 
       - name: Package artifact
         run: tar -C target/x86_64-apple-darwin/release -czvf rktools-x86_64-apple-darwin.tar.gz rktools
@@ -94,7 +94,8 @@ jobs:
 
   # Cross-compiled Linux targets in cross containers. The `vendored` feature
   # statically embeds libusb, so no per-arch libusb packages are needed in the
-  # containers and the musl artifacts are fully static.
+  # containers. Explicit crt-static is required on targets such as RISC-V;
+  # reject any dynamic interpreter or shared-library dependency before packaging.
   cross:
     name: cross (${{ matrix.target }})
     runs-on: ubuntu-latest
@@ -120,10 +121,10 @@ jobs:
 
       - name: Test native-architecture Linux musl target
         if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: cross test --workspace --target ${{ matrix.target }} --features rkusb/vendored
+        run: cross test --workspace --target ${{ matrix.target }} --features rkusb/vendored --config 'target.${{ matrix.target }}.rustflags=["-C", "target-feature=+crt-static"]'
 
       - name: Build static release
-        run: cross build --release -p rktools --target ${{ matrix.target }} --features rkusb/vendored
+        run: cross build --release -p rktools --target ${{ matrix.target }} --features rkusb/vendored --config 'target.${{ matrix.target }}.rustflags=["-C", "target-feature=+crt-static"]'
 
       - name: Verify fully static ELF
         env:
