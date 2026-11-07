@@ -10,8 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Native runners: also used for `cargo test`, and for targets cross can't
-  # produce (windows-msvc, macOS). rusb links the system libusb here.
+  # Native runners execute tests and link the system libusb.
+  # Intel macOS is cross-compiled separately on Apple Silicon.
   native:
     name: native (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
@@ -25,8 +25,6 @@ jobs:
             target: x86_64-pc-windows-msvc
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v4
 
@@ -63,6 +61,42 @@ jobs:
         with:
           name: rktools-${{ matrix.target }}
           path: rktools-${{ matrix.target }}.*
+
+  # Cross-compile Intel macOS on Apple Silicon without Intel Homebrew or Rosetta.
+  macos-cross:
+    name: cross (x86_64-apple-darwin)
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Apple Silicon host
+        run: test "$(uname -m)" = arm64
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Cross-compile workspace tests (do not execute Intel binaries)
+        run: cargo test --workspace --target x86_64-apple-darwin --features rkusb/vendored --no-run
+
+      - name: Build Intel release with bundled libusb
+        run: cargo build --release -p rktools --target x86_64-apple-darwin --features rkusb/vendored
+
+      - name: Verify Intel artifact
+        run: lipo -verify_arch x86_64 target/x86_64-apple-darwin/release/rktools
+
+      - name: Package artifact
+        run: tar -C target/x86_64-apple-darwin/release -czvf rktools-x86_64-apple-darwin.tar.gz rktools
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rktools-x86_64-apple-darwin
+          path: rktools-x86_64-apple-darwin.tar.gz
 
   # Cross-compiled Linux targets in cross containers. The `vendored` feature
   # statically embeds libusb, so no per-arch libusb packages are needed in the
